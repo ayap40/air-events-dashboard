@@ -362,6 +362,10 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
   const [loadingForEventIds, setLoadingForEventIds] = useState<Set<string>>(new Set());
   const [guestsError, setGuestsError] = useState<string | null>(null);
   const [attendeeFilter, setAttendeeFilter] = useState('');
+  const [customerStatuses, setCustomerStatuses] = useState<
+    Map<string, { isCustomer: boolean; arr: number | null; tShirtSize: string | null }>
+  >(new Map());
+  const [loadingCustomer, setLoadingCustomer] = useState(false);
 
   useEffect(() => {
     fetch('/api/luma/events')
@@ -373,6 +377,40 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
       .catch(() => setEventsError('Failed to load events'))
       .finally(() => setLoadingEvents(false));
   }, []);
+
+  // Fetch Salesforce customer status whenever the attendee list changes
+  useEffect(() => {
+    if (combinedAttendees.length === 0) {
+      setCustomerStatuses(new Map());
+      return;
+    }
+
+    const emails = combinedAttendees
+      .map(({ guest }) => (guest.email ?? guest.user_email ?? '').toLowerCase().trim())
+      .filter(Boolean);
+
+    if (emails.length === 0) return;
+
+    setLoadingCustomer(true);
+    fetch('/api/salesforce/customer-status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ emails }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.statuses) return;
+        const map = new Map<string, { isCustomer: boolean; arr: number | null; tShirtSize: string | null }>();
+        for (const [email, status] of Object.entries(data.statuses)) {
+          map.set(email, status as { isCustomer: boolean; arr: number | null; tShirtSize: string | null });
+        }
+        setCustomerStatuses(map);
+      })
+      .catch(() => {
+        // Salesforce unavailable — column will show — for all rows
+      })
+      .finally(() => setLoadingCustomer(false));
+  }, [combinedAttendees]);
 
   const handleToggleEvent = useCallback(
     async (eventId: string) => {
@@ -612,6 +650,7 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
                   <th className="px-5 py-3">Company</th>
                   <th className="px-5 py-3">LinkedIn</th>
                   <th className="px-5 py-3">Status</th>
+                  <th className="px-5 py-3">Customer</th>
                   {multiEvent && <th className="px-5 py-3 text-right"># Events</th>}
                   {multiEvent ? (
                     <th className="px-5 py-3">Events attended</th>
@@ -669,6 +708,21 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
                       </td>
                       <td className="px-5 py-3.5">
                         <StatusBadge status={status} />
+                      </td>
+                      <td className="px-5 py-3.5">
+                        {loadingCustomer ? (
+                          <span className="text-xs text-gray-300">…</span>
+                        ) : (() => {
+                          const cs = customerStatuses.get(email.toLowerCase());
+                          if (!cs) return <span className="text-xs text-gray-300">—</span>;
+                          return cs.isCustomer ? (
+                            <span className="inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium bg-purple-100 text-purple-800">
+                              Yes
+                            </span>
+                          ) : (
+                            <span className="text-xs text-gray-400">No</span>
+                          );
+                        })()}
                       </td>
                       {multiEvent && (
                         <td className="px-5 py-3.5 text-right text-sm font-medium text-gray-700">
