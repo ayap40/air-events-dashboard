@@ -571,12 +571,17 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
     if (emails.length === 0) return;
 
     setLoadingCustomer(true);
+    setSfError(null);
     fetch('/api/salesforce/customer-status', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ emails }),
     })
-      .then(r => r.json())
+      .then(async r => {
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error ?? `Salesforce HTTP ${r.status}`);
+        return data;
+      })
       .then(data => {
         if (!data.statuses) return;
         const map = new Map<string, { isCustomer: boolean; arr: number | null; tShirtSize: string | null }>();
