@@ -123,7 +123,21 @@ function ErrorBanner({ message }: { message: string }) {
 
 // -- PersonDetail ------------------------------------------------------------
 
-function PersonDetail({ result, onBack }: { result: GuestSearchResult; onBack?: () => void }) {
+interface CustomerInfo {
+  isCustomer: boolean;
+  arr: number | null;
+  tShirtSize: string | null;
+}
+
+function PersonDetail({
+  result,
+  customerInfo,
+  onBack,
+}: {
+  result: GuestSearchResult;
+  customerInfo?: CustomerInfo | null;
+  onBack?: () => void;
+}) {
   return (
     <div className="space-y-6">
       {onBack && (
@@ -163,8 +177,21 @@ function PersonDetail({ result, onBack }: { result: GuestSearchResult; onBack?: 
               </a>
             )}
           </div>
-          <div className="shrink-0 rounded-full bg-gray-100 px-3 py-1 text-sm font-medium text-gray-600">
-            {result.events.length} event{result.events.length !== 1 ? 's' : ''}
+          <div className="flex items-center gap-2">
+            {customerInfo !== undefined && (
+              customerInfo?.isCustomer ? (
+                <span className="inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium bg-purple-100 text-purple-800">
+                  Customer
+                </span>
+              ) : customerInfo === null ? null : (
+                <span className="inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium bg-gray-100 text-gray-500">
+                  Not a customer
+                </span>
+              )
+            )}
+            <div className="shrink-0 rounded-full bg-gray-100 px-3 py-1 text-sm font-medium text-gray-600">
+              {result.events.length} event{result.events.length !== 1 ? 's' : ''}
+            </div>
           </div>
         </div>
       </div>
@@ -217,6 +244,7 @@ function SearchTab({ initialQuery = '' }: { initialQuery?: string }) {
   const [selected, setSelected] = useState<GuestSearchResult | null>(null);
   const [searched, setSearched] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [customerInfoMap, setCustomerInfoMap] = useState<Map<string, CustomerInfo | null>>(new Map());
 
   const performSearch = useCallback(async (q: string) => {
     if (!q.trim()) return;
@@ -226,6 +254,7 @@ function SearchTab({ initialQuery = '' }: { initialQuery?: string }) {
     setSelected(null);
     setSearched(false);
     setError(null);
+    setCustomerInfoMap(new Map());
 
     try {
       const res = await fetch(`/api/luma/search?q=${encodeURIComponent(q.trim())}`);
@@ -240,6 +269,28 @@ function SearchTab({ initialQuery = '' }: { initialQuery?: string }) {
       setResults(list);
       setSearched(true);
       if (list.length === 1) setSelected(list[0]);
+
+      // Fetch Salesforce customer status for all results
+      if (list.length > 0) {
+        const emails = list.map(r => r.email.toLowerCase()).filter(Boolean);
+        fetch('/api/salesforce/customer-status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ emails }),
+        })
+          .then(r => r.json())
+          .then(sfData => {
+            if (!sfData.statuses) return;
+            const map = new Map<string, CustomerInfo | null>();
+            for (const r of list) {
+              const key = r.email.toLowerCase();
+              const s = sfData.statuses[key];
+              map.set(key, s ? (s as CustomerInfo) : null);
+            }
+            setCustomerInfoMap(map);
+          })
+          .catch(() => {});
+      }
     } catch {
       setError('Failed to reach the server. Please try again.');
     } finally {
@@ -306,7 +357,10 @@ function SearchTab({ initialQuery = '' }: { initialQuery?: string }) {
 
       {!loading && results.length === 1 && selected && (
         <div className="mt-8">
-          <PersonDetail result={selected} />
+          <PersonDetail
+            result={selected}
+            customerInfo={customerInfoMap.get(selected.email.toLowerCase())}
+          />
         </div>
       )}
 
@@ -343,7 +397,11 @@ function SearchTab({ initialQuery = '' }: { initialQuery?: string }) {
 
       {!loading && results.length > 1 && selected && (
         <div className="mt-8">
-          <PersonDetail result={selected} onBack={handleBack} />
+          <PersonDetail
+            result={selected}
+            customerInfo={customerInfoMap.get(selected.email.toLowerCase())}
+            onBack={handleBack}
+          />
         </div>
       )}
     </>

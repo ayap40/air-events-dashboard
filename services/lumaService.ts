@@ -155,7 +155,9 @@ export async function fetchAllEvents(): Promise<LumaEvent[]> {
   return events;
 }
 
-async function fetchWithRetry(url: string, options: RequestInit, retries = 4): Promise<Response> {
+type FetchOptions = RequestInit & { next?: { revalidate?: number } };
+
+async function fetchWithRetry(url: string, options: FetchOptions, retries = 4): Promise<Response> {
   for (let attempt = 0; attempt <= retries; attempt++) {
     const res = await fetch(url, options);
     if (res.status !== 429) return res;
@@ -177,6 +179,7 @@ export async function fetchEventGuests(eventId: string): Promise<LumaGuest[]> {
 
     const res = await fetchWithRetry(`${LUMA_API_BASE}/v1/event/get-guests?${params}`, {
       headers: headers(),
+      next: { revalidate: 300 },
     });
 
     if (!res.ok) throw new Error(`Failed to fetch guests for ${eventId}: ${res.status}`);
