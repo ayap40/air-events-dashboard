@@ -424,6 +424,7 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
     Map<string, { isCustomer: boolean; arr: number | null; tShirtSize: string | null }>
   >(new Map());
   const [loadingCustomer, setLoadingCustomer] = useState(false);
+  const [sfError, setSfError] = useState<string | null>(null);
 
   useEffect(() => {
     fetch('/api/luma/events')
@@ -584,8 +585,8 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
         }
         setCustomerStatuses(map);
       })
-      .catch(() => {
-        // Salesforce unavailable — column will show — for all rows
+      .catch((err: unknown) => {
+        setSfError(String(err));
       })
       .finally(() => setLoadingCustomer(false));
   }, [combinedAttendees]);
@@ -674,6 +675,7 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
       </div>
 
       {guestsError && <ErrorBanner message={guestsError} />}
+      {sfError && <ErrorBanner message={`Salesforce error: ${sfError}`} />}
 
       {!isLoadingGuests && selectedEventIds.length > 0 && combinedAttendees.length === 0 && (
         <div className="rounded-lg border border-gray-200 bg-white px-4 py-10 text-center text-sm text-gray-400">
