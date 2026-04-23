@@ -155,6 +155,18 @@ export async function fetchAllEvents(): Promise<LumaEvent[]> {
   return events;
 }
 
+async function fetchWithRetry(url: string, options: RequestInit, retries = 4): Promise<Response> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const res = await fetch(url, options);
+    if (res.status !== 429) return res;
+
+    const retryAfter = res.headers.get('Retry-After');
+    const delay = retryAfter ? parseInt(retryAfter, 10) * 1000 : 1000 * 2 ** attempt;
+    await new Promise(r => setTimeout(r, delay));
+  }
+  throw new Error(`Rate limited by Luma API after ${retries} retries`);
+}
+
 export async function fetchEventGuests(eventId: string): Promise<LumaGuest[]> {
   const guests: LumaGuest[] = [];
   let cursor: string | undefined;
@@ -163,7 +175,7 @@ export async function fetchEventGuests(eventId: string): Promise<LumaGuest[]> {
     const params = new URLSearchParams({ event_id: eventId, pagination_limit: '100' });
     if (cursor) params.set('pagination_cursor', cursor);
 
-    const res = await fetch(`${LUMA_API_BASE}/v1/event/get-guests?${params}`, {
+    const res = await fetchWithRetry(`${LUMA_API_BASE}/v1/event/get-guests?${params}`, {
       headers: headers(),
     });
 
