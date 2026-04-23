@@ -378,40 +378,6 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
       .finally(() => setLoadingEvents(false));
   }, []);
 
-  // Fetch Salesforce customer status whenever the attendee list changes
-  useEffect(() => {
-    if (combinedAttendees.length === 0) {
-      setCustomerStatuses(new Map());
-      return;
-    }
-
-    const emails = combinedAttendees
-      .map(({ guest }) => (guest.email ?? guest.user_email ?? '').toLowerCase().trim())
-      .filter(Boolean);
-
-    if (emails.length === 0) return;
-
-    setLoadingCustomer(true);
-    fetch('/api/salesforce/customer-status', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ emails }),
-    })
-      .then(r => r.json())
-      .then(data => {
-        if (!data.statuses) return;
-        const map = new Map<string, { isCustomer: boolean; arr: number | null; tShirtSize: string | null }>();
-        for (const [email, status] of Object.entries(data.statuses)) {
-          map.set(email, status as { isCustomer: boolean; arr: number | null; tShirtSize: string | null });
-        }
-        setCustomerStatuses(map);
-      })
-      .catch(() => {
-        // Salesforce unavailable — column will show — for all rows
-      })
-      .finally(() => setLoadingCustomer(false));
-  }, [combinedAttendees]);
-
   const handleToggleEvent = useCallback(
     async (eventId: string) => {
       if (selectedEventIds.includes(eventId)) {
@@ -531,6 +497,40 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
 
     return Array.from(byEmail.values());
   }, [selectedEventIds, guestsByEvent, events]);
+
+  // Fetch Salesforce customer status whenever the attendee list changes
+  useEffect(() => {
+    if (combinedAttendees.length === 0) {
+      setCustomerStatuses(new Map());
+      return;
+    }
+
+    const emails = combinedAttendees
+      .map(({ guest }) => (guest.email ?? guest.user_email ?? '').toLowerCase().trim())
+      .filter(Boolean);
+
+    if (emails.length === 0) return;
+
+    setLoadingCustomer(true);
+    fetch('/api/salesforce/customer-status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ emails }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.statuses) return;
+        const map = new Map<string, { isCustomer: boolean; arr: number | null; tShirtSize: string | null }>();
+        for (const [email, status] of Object.entries(data.statuses)) {
+          map.set(email, status as { isCustomer: boolean; arr: number | null; tShirtSize: string | null });
+        }
+        setCustomerStatuses(map);
+      })
+      .catch(() => {
+        // Salesforce unavailable — column will show — for all rows
+      })
+      .finally(() => setLoadingCustomer(false));
+  }, [combinedAttendees]);
 
   const filteredAttendees = useMemo(() => {
     if (!attendeeFilter.trim()) return combinedAttendees;
