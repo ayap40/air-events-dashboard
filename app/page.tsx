@@ -210,45 +210,55 @@ function PersonDetail({ result, onBack }: { result: GuestSearchResult; onBack?: 
 
 // -- Search tab --------------------------------------------------------------
 
-function SearchTab() {
-  const [query, setQuery] = useState('');
+function SearchTab({ initialQuery = '' }: { initialQuery?: string }) {
+  const [query, setQuery] = useState(initialQuery);
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<GuestSearchResult[]>([]);
   const [selected, setSelected] = useState<GuestSearchResult | null>(null);
   const [searched, setSearched] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const handleSearch = useCallback(
-    async (e: React.FormEvent) => {
-      e.preventDefault();
-      if (!query.trim()) return;
+  const performSearch = useCallback(async (q: string) => {
+    if (!q.trim()) return;
 
-      setLoading(true);
-      setResults([]);
-      setSelected(null);
-      setSearched(false);
-      setError(null);
+    setLoading(true);
+    setResults([]);
+    setSelected(null);
+    setSearched(false);
+    setError(null);
 
-      try {
-        const res = await fetch(`/api/luma/search?q=${encodeURIComponent(query.trim())}`);
-        const data = await res.json();
+    try {
+      const res = await fetch(`/api/luma/search?q=${encodeURIComponent(q.trim())}`);
+      const data = await res.json();
 
-        if (!res.ok) {
-          setError(data.error ?? 'Something went wrong');
-          return;
-        }
-
-        const list: GuestSearchResult[] = data.results ?? [];
-        setResults(list);
-        setSearched(true);
-        if (list.length === 1) setSelected(list[0]);
-      } catch {
-        setError('Failed to reach the server. Please try again.');
-      } finally {
-        setLoading(false);
+      if (!res.ok) {
+        setError(data.error ?? 'Something went wrong');
+        return;
       }
+
+      const list: GuestSearchResult[] = data.results ?? [];
+      setResults(list);
+      setSearched(true);
+      if (list.length === 1) setSelected(list[0]);
+    } catch {
+      setError('Failed to reach the server. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (initialQuery) performSearch(initialQuery);
+    // Only run on mount — initialQuery is captured via key-based remount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleSearch = useCallback(
+    (e: React.FormEvent) => {
+      e.preventDefault();
+      performSearch(query);
     },
-    [query]
+    [query, performSearch]
   );
 
   const handleQueryChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -342,7 +352,7 @@ function SearchTab() {
 
 // -- Event attendees tab -----------------------------------------------------
 
-function AttendeesTab() {
+function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => void }) {
   const [events, setEvents] = useState<LumaEvent[]>([]);
   const [loadingEvents, setLoadingEvents] = useState(true);
   const [eventsError, setEventsError] = useState<string | null>(null);
@@ -566,9 +576,19 @@ function AttendeesTab() {
                       </td>
                       <td className="px-5 py-3.5 text-gray-500">
                         {email ? (
-                          <a href={`mailto:${email}`} className="hover:text-gray-700">
-                            {email}
-                          </a>
+                          onSearchEmail ? (
+                            <button
+                              type="button"
+                              onClick={() => onSearchEmail(email)}
+                              className="text-left hover:text-blue-600 hover:underline"
+                            >
+                              {email}
+                            </button>
+                          ) : (
+                            <a href={`mailto:${email}`} className="hover:text-gray-700">
+                              {email}
+                            </a>
+                          )
                         ) : (
                           '—'
                         )}
@@ -593,15 +613,16 @@ function AttendeesTab() {
                         <StatusBadge status={status} />
                       </td>
                       {multiEvent ? (
-                        <td
-                          className="px-5 py-3.5 text-xs text-gray-500"
-                          title={attendances.map(a => a.event.name).join('\n')}
-                        >
-                          {attendances.map(a => formatShortDate(a.event.start_at)).join(' · ')}
+                        <td className="px-5 py-3.5 text-xs text-gray-500">
+                          <div className="space-y-0.5">
+                            {attendances.map(a => (
+                              <div key={a.event.api_id}>{a.event.name}</div>
+                            ))}
+                          </div>
                           {attendances.length < selectedEventIds.length && (
-                            <span className="ml-1.5 text-gray-300">
-                              ({attendances.length}/{selectedEventIds.length})
-                            </span>
+                            <div className="mt-0.5 text-gray-300">
+                              {attendances.length}/{selectedEventIds.length} events
+                            </div>
                           )}
                         </td>
                       ) : (
@@ -627,9 +648,17 @@ type Tab = 'search' | 'attendees';
 
 export default function EventsDashboard() {
   const [tab, setTab] = useState<Tab>('search');
+  const [searchEmail, setSearchEmail] = useState('');
+  const [searchKey, setSearchKey] = useState(0);
 
   const handleTabSearch = useCallback(() => setTab('search'), []);
   const handleTabAttendees = useCallback(() => setTab('attendees'), []);
+
+  const handleSearchEmail = useCallback((email: string) => {
+    setSearchEmail(email);
+    setSearchKey(prev => prev + 1);
+    setTab('search');
+  }, []);
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -651,8 +680,8 @@ export default function EventsDashboard() {
           </button>
         </div>
 
-        {tab === 'search' && <SearchTab />}
-        {tab === 'attendees' && <AttendeesTab />}
+        {tab === 'search' && <SearchTab key={searchKey} initialQuery={searchEmail} />}
+        {tab === 'attendees' && <AttendeesTab onSearchEmail={handleSearchEmail} />}
       </div>
     </div>
   );
