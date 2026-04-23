@@ -51,23 +51,18 @@ function toIso(localDatetime: string): string {
 }
 
 function getGuestCompany(guest: LumaGuest): string | null {
-  if (!guest.answers) return null;
-  const answer = guest.answers.find(a =>
-    (a.label ?? a.question ?? '').toLowerCase().includes('company')
-  );
-  return answer?.answer?.trim() || null;
+  const answer = guest.registration_answers?.find(a => a.question_type === 'company');
+  return answer?.answer_company ?? answer?.answer ?? null;
 }
 
 function getGuestLinkedin(guest: LumaGuest): string | null {
-  if (guest.user?.linkedin_handle) {
-    const h = guest.user.linkedin_handle.trim();
-    return h.startsWith('http') ? h : `https://linkedin.com/in/${h}`;
-  }
-  if (!guest.answers) return null;
-  const byUrl = guest.answers.find(a => a.answer?.toLowerCase().includes('linkedin.com'));
+  if (!guest.registration_answers) return null;
+  const byUrl = guest.registration_answers.find(a =>
+    a.answer?.toLowerCase().includes('linkedin.com')
+  );
   if (byUrl) return byUrl.answer.trim();
-  const byLabel = guest.answers.find(a =>
-    (a.label ?? a.question ?? '').toLowerCase().includes('linkedin')
+  const byLabel = guest.registration_answers.find(a =>
+    a.label?.toLowerCase().includes('linkedin')
   );
   return byLabel?.answer?.trim() || null;
 }
@@ -394,8 +389,8 @@ function AttendeesTab() {
     if (!filter.trim()) return guests;
     const q = filter.toLowerCase();
     return guests.filter(g => {
-      const name = (g.user?.name ?? '').toLowerCase();
-      const email = (g.user?.email ?? '').toLowerCase();
+      const name = (g.name ?? g.user_name ?? '').toLowerCase();
+      const email = (g.email ?? g.user_email ?? '').toLowerCase();
       const company = (getGuestCompany(g) ?? '').toLowerCase();
       return name.includes(q) || email.includes(q) || company.includes(q);
     });
@@ -481,15 +476,15 @@ function AttendeesTab() {
                   return (
                     <tr key={guest.api_id} className="hover:bg-gray-50">
                       <td className="px-5 py-3.5 font-medium text-gray-900">
-                        {guest.user?.name ?? '—'}
+                        {guest.name ?? guest.user_name ?? '—'}
                       </td>
                       <td className="px-5 py-3.5 text-gray-500">
-                        {guest.user?.email ? (
+                        {(guest.email ?? guest.user_email) ? (
                           <a
-                            href={`mailto:${guest.user.email}`}
+                            href={`mailto:${guest.email ?? guest.user_email}`}
                             className="hover:text-gray-700"
                           >
-                            {guest.user.email}
+                            {guest.email ?? guest.user_email}
                           </a>
                         ) : '—'}
                       </td>

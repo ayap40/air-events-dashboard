@@ -17,22 +17,27 @@ interface CalendarListResponse {
   next_cursor: string | null;
 }
 
-interface LumaUser {
-  api_id: string;
-  name: string | null;
-  email: string;
-  linkedin_handle: string | null;
-  avatar_url: string | null;
+export interface LumaRegistrationAnswer {
+  label: string;
+  answer: string;
+  question_type: string;
+  answer_company?: string;
+  answer_job_title?: string;
 }
 
 export interface LumaGuest {
   api_id: string;
-  event_api_id: string;
-  user: LumaUser;
-  registered_at: string;
   approval_status: string;
-  checked_in_at?: string | null;
-  answers?: Array<{ label?: string; question?: string; answer: string }>;
+  registered_at: string;
+  checked_in_at: string | null;
+  // User fields are flat on the entry (no nested user object)
+  name: string | null;
+  email: string;
+  user_name: string | null;
+  user_email: string;
+  user_first_name: string | null;
+  user_last_name: string | null;
+  registration_answers: LumaRegistrationAnswer[];
 }
 
 interface GuestsResponse {
@@ -64,43 +69,45 @@ function headers(): HeadersInit {
   };
 }
 
+function guestEmail(guest: LumaGuest): string {
+  return guest.email ?? guest.user_email ?? '';
+}
+
+function guestName(guest: LumaGuest): string {
+  return guest.name ?? guest.user_name ?? '';
+}
+
 function extractLinkedinUrl(guest: LumaGuest): string | null {
-  if (guest.user.linkedin_handle) {
-    const handle = guest.user.linkedin_handle.trim();
-    return handle.startsWith('http') ? handle : `https://linkedin.com/in/${handle}`;
-  }
+  if (!guest.registration_answers || guest.registration_answers.length === 0) return null;
 
-  if (guest.answers && guest.answers.length > 0) {
-    const linkedinAnswer = guest.answers.find(
-      a => a.answer && a.answer.toLowerCase().includes('linkedin.com')
-    );
-    if (linkedinAnswer) return linkedinAnswer.answer.trim();
+  const byUrl = guest.registration_answers.find(
+    a => a.answer && a.answer.toLowerCase().includes('linkedin.com')
+  );
+  if (byUrl) return byUrl.answer.trim();
 
-    const labeledAnswer = guest.answers.find(a => {
-      const label = (a.label ?? a.question ?? '').toLowerCase();
-      return label.includes('linkedin');
-    });
-    if (labeledAnswer?.answer) return labeledAnswer.answer.trim();
-  }
+  const byLabel = guest.registration_answers.find(a =>
+    a.label.toLowerCase().includes('linkedin')
+  );
+  if (byLabel?.answer) return byLabel.answer.trim();
 
   return null;
 }
 
 function extractCompany(guest: LumaGuest): string | null {
-  if (!guest.answers || guest.answers.length === 0) return null;
-  const answer = guest.answers.find(a => {
-    const label = (a.label ?? a.question ?? '').toLowerCase();
-    return label.includes('company') || label.includes('organization');
-  });
-  return answer?.answer?.trim() || null;
+  if (!guest.registration_answers || guest.registration_answers.length === 0) return null;
+  const answer = guest.registration_answers.find(a => a.question_type === 'company');
+  return answer?.answer_company ?? answer?.answer ?? null;
 }
 
 function buildGuestResult(guest: LumaGuest, attendance: EventAttendance[]): GuestSearchResult {
-  const nameParts = (guest.user.name ?? '').trim().split(/\s+/);
+  const firstName =
+    guest.user_first_name ?? guestName(guest).split(' ')[0] ?? '';
+  const lastName =
+    guest.user_last_name ?? guestName(guest).split(' ').slice(1).join(' ') ?? '';
   return {
-    firstName: nameParts[0] ?? '',
-    lastName: nameParts.slice(1).join(' '),
-    email: guest.user.email,
+    firstName,
+    lastName,
+    email: guestEmail(guest),
     company: extractCompany(guest),
     linkedinUrl: extractLinkedinUrl(guest),
     events: attendance.sort(
@@ -206,7 +213,7 @@ export async function createEvent(input: CreateEventInput): Promise<CreatedEvent
     throw new Error(`Failed to create event: ${res.status} ${text}`);
   }
 
-  const data = await res.json() as CreatedEvent;
+  const data = (await res.json()) as CreatedEvent;
   return { api_id: data.api_id, url: data.url, name: data.name };
 }
 
@@ -240,7 +247,7 @@ export async function searchGuestByEmail(email: string): Promise<GuestSearchResu
       batch.map(async event => {
         try {
           const guests = await fetchEventGuests(event.api_id);
-          const match = guests.find(g => g.user.email?.toLowerCase() === normalizedEmail);
+          const match = guests.find(g => guestEmail(g).toLowerCase() === normalizedEmail);
           return match ? { event, guest: match } : null;
         } catch {
           return null;
@@ -257,7 +264,6 @@ export async function searchGuestByEmail(email: string): Promise<GuestSearchResu
 export async function searchGuestsByName(query: string): Promise<GuestSearchResult[]> {
   const normalized = query.toLowerCase().trim();
   const allEvents = await fetchAllEvents();
-  // email → { firstGuest, attendance[] }
   const byEmail = new Map<string, { firstGuest: LumaGuest; attendance: EventAttendance[] }>();
 
   for (let i = 0; i < allEvents.length; i += BATCH_SIZE) {
@@ -277,10 +283,10 @@ export async function searchGuestsByName(query: string): Promise<GuestSearchResu
       if (!result) continue;
       const { event, guests } = result;
       for (const guest of guests) {
-        const name = (guest.user.name ?? '').toLowerCase();
+        const name = guestName(guest).toLowerCase();
         if (!name.includes(normalized)) continue;
 
-        const email = guest.user.email.toLowerCase();
+        const email = guestEmail(guest).toLowerCase();
         const existing = byEmail.get(email);
         if (existing) {
           existing.attendance.push({ event, guest });
