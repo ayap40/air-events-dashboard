@@ -431,6 +431,46 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
     return events.filter(e => e.name.toLowerCase().includes(q));
   }, [events, eventSearch]);
 
+  const handleSelectAll = useCallback(() => {
+    const toAdd = filteredEventList.filter(e => !selectedEventIds.includes(e.api_id));
+    if (toAdd.length === 0) return;
+
+    const ids = toAdd.map(e => e.api_id);
+    setSelectedEventIds(prev => [...prev, ...ids]);
+    setLoadingForEventIds(prev => new Set([...prev, ...ids]));
+    setGuestsError(null);
+
+    toAdd.forEach(async event => {
+      try {
+        const res = await fetch(`/api/luma/guests?event_id=${encodeURIComponent(event.api_id)}`);
+        const data = await res.json();
+        if (res.ok) {
+          setGuestsByEvent(prev => {
+            const next = new Map(prev);
+            next.set(event.api_id, data.guests);
+            return next;
+          });
+        } else {
+          setSelectedEventIds(prev => prev.filter(id => id !== event.api_id));
+        }
+      } catch {
+        setSelectedEventIds(prev => prev.filter(id => id !== event.api_id));
+      } finally {
+        setLoadingForEventIds(prev => {
+          const next = new Set(prev);
+          next.delete(event.api_id);
+          return next;
+        });
+      }
+    });
+  }, [filteredEventList, selectedEventIds]);
+
+  const handleClearAll = useCallback(() => {
+    setSelectedEventIds([]);
+    setGuestsByEvent(new Map());
+    setLoadingForEventIds(new Set());
+  }, []);
+
   // Merge all selected events' guests, deduped by email
   const combinedAttendees = useMemo((): CombinedAttendee[] => {
     const byEmail = new Map<string, CombinedAttendee>();
@@ -475,14 +515,31 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
     <div className="space-y-6">
       {/* Event picker with checkboxes */}
       <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
-        <div className="border-b border-gray-100 px-4 py-3">
+        <div className="flex items-center gap-3 border-b border-gray-100 px-4 py-3">
           <input
             type="text"
             value={eventSearch}
             onChange={handleEventSearchChange}
             placeholder="Filter events…"
-            className="w-full bg-transparent text-sm text-gray-900 placeholder-gray-400 outline-none"
+            className="flex-1 bg-transparent text-sm text-gray-900 placeholder-gray-400 outline-none"
           />
+          <button
+            type="button"
+            onClick={handleSelectAll}
+            disabled={filteredEventList.every(e => selectedEventIds.includes(e.api_id))}
+            className="shrink-0 text-xs text-blue-600 hover:text-blue-800 disabled:text-gray-300"
+          >
+            Select all
+          </button>
+          {selectedEventIds.length > 0 && (
+            <button
+              type="button"
+              onClick={handleClearAll}
+              className="shrink-0 text-xs text-gray-400 hover:text-gray-600"
+            >
+              Clear
+            </button>
+          )}
         </div>
         <div className="max-h-64 overflow-y-auto">
           {filteredEventList.length === 0 ? (
@@ -555,6 +612,7 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
                   <th className="px-5 py-3">Company</th>
                   <th className="px-5 py-3">LinkedIn</th>
                   <th className="px-5 py-3">Status</th>
+                  {multiEvent && <th className="px-5 py-3 text-right"># Events</th>}
                   {multiEvent ? (
                     <th className="px-5 py-3">Events attended</th>
                   ) : (
@@ -612,6 +670,14 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
                       <td className="px-5 py-3.5">
                         <StatusBadge status={status} />
                       </td>
+                      {multiEvent && (
+                        <td className="px-5 py-3.5 text-right text-sm font-medium text-gray-700">
+                          {attendances.length}
+                          <span className="font-normal text-gray-400">
+                            /{selectedEventIds.length}
+                          </span>
+                        </td>
+                      )}
                       {multiEvent ? (
                         <td className="px-5 py-3.5 text-xs text-gray-500">
                           <div className="space-y-0.5">
