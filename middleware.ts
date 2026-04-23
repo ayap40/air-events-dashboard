@@ -8,7 +8,7 @@ export function middleware(request: NextRequest) {
 
   const authHeader = request.headers.get('authorization');
   if (authHeader?.startsWith('Basic ')) {
-    const credentials = Buffer.from(authHeader.slice(6), 'base64').toString();
+    const credentials = atob(authHeader.slice(6));
     const colonIndex = credentials.indexOf(':');
     const username = credentials.slice(0, colonIndex);
     const password = credentials.slice(colonIndex + 1);
