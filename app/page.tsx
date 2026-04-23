@@ -59,7 +59,7 @@ function getGuestCompany(guest: LumaGuest): string | null {
 }
 
 function getGuestLinkedin(guest: LumaGuest): string | null {
-  if (guest.user.linkedin_handle) {
+  if (guest.user?.linkedin_handle) {
     const h = guest.user.linkedin_handle.trim();
     return h.startsWith('http') ? h : `https://linkedin.com/in/${h}`;
   }
@@ -394,8 +394,8 @@ function AttendeesTab() {
     if (!filter.trim()) return guests;
     const q = filter.toLowerCase();
     return guests.filter(g => {
-      const name = (g.user.name ?? '').toLowerCase();
-      const email = g.user.email.toLowerCase();
+      const name = (g.user?.name ?? '').toLowerCase();
+      const email = (g.user?.email ?? '').toLowerCase();
       const company = (getGuestCompany(g) ?? '').toLowerCase();
       return name.includes(q) || email.includes(q) || company.includes(q);
     });
@@ -481,15 +481,17 @@ function AttendeesTab() {
                   return (
                     <tr key={guest.api_id} className="hover:bg-gray-50">
                       <td className="px-5 py-3.5 font-medium text-gray-900">
-                        {guest.user.name ?? '—'}
+                        {guest.user?.name ?? '—'}
                       </td>
                       <td className="px-5 py-3.5 text-gray-500">
-                        <a
-                          href={`mailto:${guest.user.email}`}
-                          className="hover:text-gray-700"
-                        >
-                          {guest.user.email}
-                        </a>
+                        {guest.user?.email ? (
+                          <a
+                            href={`mailto:${guest.user.email}`}
+                            className="hover:text-gray-700"
+                          >
+                            {guest.user.email}
+                          </a>
+                        ) : '—'}
                       </td>
                       <td className="px-5 py-3.5 text-gray-500">{company ?? '—'}</td>
                       <td className="px-5 py-3.5">
