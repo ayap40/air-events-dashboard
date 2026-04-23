@@ -1,4 +1,7 @@
-const SF_LOGIN_URL = 'https://login.salesforce.com';
+// Uses OAuth 2.0 Client Credentials flow — no user password required.
+// Works with SSO orgs. Read-only access is enforced by the "Run As" user's
+// profile on the Connected App.
+
 const SF_API_VERSION = 'v59.0';
 const BATCH_SIZE = 200;
 
@@ -10,7 +13,7 @@ export interface CustomerStatus {
   tShirtSize: string | null;
 }
 
-// -- Token cache (module-level, reused within a single serverless invocation) --
+// -- Token cache ------------------------------------------------------------
 
 interface TokenCache {
   access_token: string;
@@ -23,18 +26,15 @@ let _token: TokenCache | null = null;
 async function getToken(): Promise<TokenCache> {
   if (_token && Date.now() < _token.expires_at) return _token;
 
+  const instanceUrl = (process.env.SALESFORCE_INSTANCE_URL ?? '').replace(/\/$/, '');
+
   const params = new URLSearchParams({
-    grant_type: 'password',
+    grant_type: 'client_credentials',
     client_id: process.env.SALESFORCE_CLIENT_ID ?? '',
     client_secret: process.env.SALESFORCE_CLIENT_SECRET ?? '',
-    username: process.env.SALESFORCE_USERNAME ?? '',
-    // Salesforce password + security token are concatenated
-    password:
-      (process.env.SALESFORCE_PASSWORD ?? '') +
-      (process.env.SALESFORCE_SECURITY_TOKEN ?? ''),
   });
 
-  const res = await fetch(`${SF_LOGIN_URL}/services/oauth2/token`, {
+  const res = await fetch(`${instanceUrl}/services/oauth2/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: params,
@@ -46,10 +46,10 @@ async function getToken(): Promise<TokenCache> {
   }
 
   const data = await res.json();
-  // Cache token for 115 minutes (default lifetime is 2 hours)
+  // Cache token for 115 minutes (Salesforce default session lifetime is 2h)
   _token = {
     access_token: data.access_token,
-    instance_url: data.instance_url,
+    instance_url: data.instance_url ?? instanceUrl,
     expires_at: Date.now() + 115 * 60 * 1000,
   };
   return _token;
