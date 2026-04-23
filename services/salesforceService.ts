@@ -4,6 +4,14 @@
 
 const SF_API_VERSION = 'v59.0';
 const BATCH_SIZE = 200;
+const DOMAIN_BATCH_SIZE = 50;
+
+// Free/personal email providers — skip domain lookup for these
+const FREE_EMAIL_DOMAINS = new Set([
+  'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com',
+  'me.com', 'mac.com', 'aol.com', 'protonmail.com', 'live.com',
+  'msn.com', 'ymail.com', 'googlemail.com',
+]);
 
 // -- Types ------------------------------------------------------------------
 
@@ -11,6 +19,7 @@ export interface CustomerStatus {
   isCustomer: boolean;
   arr: number | null;
   tShirtSize: string | null;
+  matchedBy?: 'email' | 'domain';
 }
 
 // -- Token cache ------------------------------------------------------------
@@ -46,7 +55,6 @@ async function getToken(): Promise<TokenCache> {
   }
 
   const data = await res.json();
-  // Cache token for 115 minutes (Salesforce default session lifetime is 2h)
   _token = {
     access_token: data.access_token,
     instance_url: data.instance_url ?? instanceUrl,
@@ -55,7 +63,31 @@ async function getToken(): Promise<TokenCache> {
   return _token;
 }
 
-// -- Query ------------------------------------------------------------------
+async function soqlQuery(token: TokenCache, soql: string): Promise<Record<string, unknown>[]> {
+  const res = await fetch(
+    `${token.instance_url}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`,
+    { headers: { Authorization: `Bearer ${token.access_token}` } }
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Salesforce query failed: ${res.status} ${text}`);
+  }
+  const data = await res.json();
+  return (data.records ?? []) as Record<string, unknown>[];
+}
+
+function statusFromRecord(record: Record<string, unknown>, accountKey = 'Account'): CustomerStatus {
+  const account = (record[accountKey] ?? record) as Record<string, unknown>;
+  const arr = (account.Total_Product_Instance_ARR__c as number | null) ?? null;
+  const tShirtSize = (account.T_Shirt_Size__c as string | null) ?? null;
+  return {
+    isCustomer: (arr !== null && arr > 0) || tShirtSize !== null,
+    arr,
+    tShirtSize,
+  };
+}
+
+// -- Public API -------------------------------------------------------------
 
 export async function getCustomerStatuses(
   emails: string[]
@@ -65,6 +97,7 @@ export async function getCustomerStatuses(
   const token = await getToken();
   const result = new Map<string, CustomerStatus>();
 
+  // Pass 1: exact Contact email match
   for (let i = 0; i < emails.length; i += BATCH_SIZE) {
     const batch = emails.slice(i, i + BATCH_SIZE);
     const emailList = batch.map(e => `'${e.replace(/'/g, "\\'")}'`).join(',');
@@ -76,31 +109,65 @@ export async function getCustomerStatuses(
       'AND AccountId != null',
     ].join(' ');
 
-    const res = await fetch(
-      `${token.instance_url}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`,
-      { headers: { Authorization: `Bearer ${token.access_token}` } }
-    );
+    const records = await soqlQuery(token, soql);
+    for (const record of records) {
+      const email = ((record.Email as string) ?? '').toLowerCase();
+      if (!email) continue;
+      result.set(email, { ...statusFromRecord(record), matchedBy: 'email' });
+    }
+  }
 
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Salesforce query failed: ${res.status} ${text}`);
+  // Pass 2: domain-based Account Website match for unresolved emails
+  const unmatched = emails.filter(e => !result.has(e));
+  const domains = [
+    ...new Set(
+      unmatched
+        .map(e => e.split('@')[1] ?? '')
+        .filter(d => d && !FREE_EMAIL_DOMAINS.has(d))
+    ),
+  ];
+
+  for (let i = 0; i < domains.length; i += DOMAIN_BATCH_SIZE) {
+    const batch = domains.slice(i, i + DOMAIN_BATCH_SIZE);
+
+    // Match Website containing the domain string (handles https://www.harvey.ai, harvey.ai, etc.)
+    const conditions = batch
+      .map(d => `Website LIKE '%${d.replace(/'/g, "\\'")}'` +
+                ` OR Website LIKE '%${d.replace(/'/g, "\\'")}/%'`)
+      .join(' OR ');
+
+    const soql = [
+      'SELECT Website, Total_Product_Instance_ARR__c, T_Shirt_Size__c',
+      'FROM Account',
+      `WHERE (${conditions})`,
+      'AND (Total_Product_Instance_ARR__c > 0 OR T_Shirt_Size__c != null)',
+    ].join(' ');
+
+    const records = await soqlQuery(token, soql);
+
+    // Build domain → status map from results
+    const domainStatus = new Map<string, CustomerStatus>();
+    for (const record of records) {
+      const website = ((record.Website as string) ?? '')
+        .toLowerCase()
+        .replace(/^https?:\/\//, '')
+        .replace(/^www\./, '')
+        .replace(/\/$/, '');
+
+      for (const domain of batch) {
+        if (website === domain || website.endsWith(`.${domain}`) || website.startsWith(`${domain}/`)) {
+          if (!domainStatus.has(domain)) {
+            domainStatus.set(domain, { ...statusFromRecord(record, 'self'), matchedBy: 'domain' });
+          }
+        }
+      }
     }
 
-    const data = await res.json();
-    for (const record of data.records ?? []) {
-      const email = (record.Email ?? '').toLowerCase();
-      if (!email) continue;
-
-      const arr: number | null =
-        record.Account?.Total_Product_Instance_ARR__c ?? null;
-      const tShirtSize: string | null =
-        record.Account?.T_Shirt_Size__c ?? null;
-
-      result.set(email, {
-        isCustomer: (arr !== null && arr > 0) || tShirtSize !== null,
-        arr,
-        tShirtSize,
-      });
+    // Apply domain status to unmatched emails
+    for (const email of unmatched) {
+      const domain = email.split('@')[1] ?? '';
+      const status = domainStatus.get(domain);
+      if (status) result.set(email, status);
     }
   }
 
