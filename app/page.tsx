@@ -4,6 +4,13 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import type { GuestSearchResult, LumaEvent, LumaGuest } from '@/services/lumaService';
 
+// -- Types -------------------------------------------------------------------
+
+interface CombinedAttendee {
+  guest: LumaGuest;
+  attendances: Array<{ event: LumaEvent; guest: LumaGuest }>;
+}
+
 // -- Constants ---------------------------------------------------------------
 
 const STATUS_LABELS: Record<string, string> = {
@@ -22,20 +29,6 @@ const STATUS_COLORS: Record<string, string> = {
   checked_in: 'bg-blue-100 text-blue-800',
 };
 
-const TIMEZONES = [
-  'America/Los_Angeles',
-  'America/Denver',
-  'America/Chicago',
-  'America/New_York',
-  'America/Toronto',
-  'Europe/London',
-  'Europe/Paris',
-  'Asia/Tokyo',
-  'Asia/Singapore',
-  'Australia/Sydney',
-  'UTC',
-];
-
 // -- Helpers -----------------------------------------------------------------
 
 function formatDate(iso: string) {
@@ -46,13 +39,8 @@ function formatDate(iso: string) {
   });
 }
 
-function toIso(localDatetime: string): string {
-  return new Date(localDatetime).toISOString();
-}
-
-function getGuestCompany(guest: LumaGuest): string | null {
-  const answer = guest.registration_answers?.find(a => a.question_type === 'company');
-  return answer?.answer_company ?? answer?.answer ?? null;
+function formatShortDate(iso: string) {
+  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
 function normalizeLinkedinUrl(raw: string): string {
@@ -65,12 +53,19 @@ function normalizeLinkedinUrl(raw: string): string {
   return s;
 }
 
+function getGuestCompany(guest: LumaGuest): string | null {
+  const answer = guest.registration_answers?.find(a => a.question_type === 'company');
+  return answer?.answer_company ?? answer?.answer ?? null;
+}
+
 function getGuestLinkedin(guest: LumaGuest): string | null {
   if (!guest.registration_answers) return null;
-  const byUrl = guest.registration_answers.find(a =>
-    a.answer?.toLowerCase().includes('linkedin.com') ||
-    a.answer?.toLowerCase().startsWith('/in/') ||
-    a.answer?.toLowerCase().startsWith('in/')
+  const byUrl = guest.registration_answers.find(
+    a =>
+      a.answer &&
+      (a.answer.toLowerCase().includes('linkedin.com') ||
+        a.answer.toLowerCase().startsWith('/in/') ||
+        a.answer.toLowerCase().startsWith('in/'))
   );
   if (byUrl?.answer) return normalizeLinkedinUrl(byUrl.answer);
   const byLabel = guest.registration_answers.find(a =>
@@ -78,6 +73,16 @@ function getGuestLinkedin(guest: LumaGuest): string | null {
   );
   if (byLabel?.answer) return normalizeLinkedinUrl(byLabel.answer);
   return null;
+}
+
+function bestStatus(attendances: Array<{ event: LumaEvent; guest: LumaGuest }>): string {
+  if (attendances.some(a => a.guest.checked_in_at)) return 'checked_in';
+  const statuses = attendances.map(a => a.guest.approval_status);
+  if (statuses.includes('approved')) return 'approved';
+  if (statuses.includes('pending_approval')) return 'pending_approval';
+  if (statuses.includes('waitlisted')) return 'waitlisted';
+  if (statuses.includes('declined')) return 'declined';
+  return statuses[0] ?? 'approved';
 }
 
 function tabClass(active: boolean) {
@@ -116,15 +121,9 @@ function ErrorBanner({ message }: { message: string }) {
   );
 }
 
-// -- PersonDetail (shared between search results) ----------------------------
+// -- PersonDetail ------------------------------------------------------------
 
-function PersonDetail({
-  result,
-  onBack,
-}: {
-  result: GuestSearchResult;
-  onBack?: () => void;
-}) {
+function PersonDetail({ result, onBack }: { result: GuestSearchResult; onBack?: () => void }) {
   return (
     <div className="space-y-6">
       {onBack && (
@@ -196,7 +195,9 @@ function PersonDetail({
                 <td className="px-5 py-3.5 text-gray-500">{formatDate(event.start_at)}</td>
                 <td className="px-5 py-3.5 text-gray-500">{formatDate(guest.registered_at)}</td>
                 <td className="px-5 py-3.5">
-                  <StatusBadge status={guest.approval_status} />
+                  <StatusBadge
+                    status={guest.checked_in_at ? 'checked_in' : guest.approval_status}
+                  />
                 </td>
               </tr>
             ))}
@@ -256,9 +257,7 @@ function SearchTab() {
 
   const handleBack = useCallback(() => setSelected(null), []);
 
-  const handleSelect = useCallback((result: GuestSearchResult) => {
-    setSelected(result);
-  }, []);
+  const handleSelect = useCallback((result: GuestSearchResult) => setSelected(result), []);
 
   return (
     <>
@@ -295,14 +294,12 @@ function SearchTab() {
         </div>
       )}
 
-      {/* Single result — show detail directly */}
       {!loading && results.length === 1 && selected && (
         <div className="mt-8">
           <PersonDetail result={selected} />
         </div>
       )}
 
-      {/* Multiple results — show picker list */}
       {!loading && results.length > 1 && !selected && (
         <div className="mt-8 space-y-3">
           <p className="text-sm text-gray-500">
@@ -334,7 +331,6 @@ function SearchTab() {
         </div>
       )}
 
-      {/* Multiple results — drill into one person */}
       {!loading && results.length > 1 && selected && (
         <div className="mt-8">
           <PersonDetail result={selected} onBack={handleBack} />
@@ -350,123 +346,193 @@ function AttendeesTab() {
   const [events, setEvents] = useState<LumaEvent[]>([]);
   const [loadingEvents, setLoadingEvents] = useState(true);
   const [eventsError, setEventsError] = useState<string | null>(null);
-  const [selectedEventId, setSelectedEventId] = useState('');
-  const [guests, setGuests] = useState<LumaGuest[]>([]);
-  const [loadingGuests, setLoadingGuests] = useState(false);
+  const [eventSearch, setEventSearch] = useState('');
+  const [selectedEventIds, setSelectedEventIds] = useState<string[]>([]);
+  const [guestsByEvent, setGuestsByEvent] = useState<Map<string, LumaGuest[]>>(new Map());
+  const [loadingForEventIds, setLoadingForEventIds] = useState<Set<string>>(new Set());
   const [guestsError, setGuestsError] = useState<string | null>(null);
-  const [filter, setFilter] = useState('');
+  const [attendeeFilter, setAttendeeFilter] = useState('');
 
   useEffect(() => {
     fetch('/api/luma/events')
       .then(r => r.json())
       .then(data => {
-        if (data.events) {
-          setEvents(data.events);
-        } else {
-          setEventsError(data.error ?? 'Failed to load events');
-        }
+        if (data.events) setEvents(data.events);
+        else setEventsError(data.error ?? 'Failed to load events');
       })
       .catch(() => setEventsError('Failed to load events'))
       .finally(() => setLoadingEvents(false));
   }, []);
 
-  const handleEventChange = useCallback(async (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const id = e.target.value;
-    setSelectedEventId(id);
-    setGuests([]);
-    setFilter('');
-    setGuestsError(null);
-    if (!id) return;
-
-    setLoadingGuests(true);
-    try {
-      const res = await fetch(`/api/luma/guests?event_id=${encodeURIComponent(id)}`);
-      const data = await res.json();
-      if (!res.ok) {
-        setGuestsError(data.error ?? 'Failed to load attendees');
-      } else {
-        setGuests(data.guests);
+  const handleToggleEvent = useCallback(
+    async (eventId: string) => {
+      if (selectedEventIds.includes(eventId)) {
+        setSelectedEventIds(prev => prev.filter(id => id !== eventId));
+        setGuestsByEvent(prev => {
+          const next = new Map(prev);
+          next.delete(eventId);
+          return next;
+        });
+        return;
       }
-    } catch {
-      setGuestsError('Failed to load attendees');
-    } finally {
-      setLoadingGuests(false);
+
+      setSelectedEventIds(prev => [...prev, eventId]);
+      setLoadingForEventIds(prev => new Set([...prev, eventId]));
+      setGuestsError(null);
+
+      try {
+        const res = await fetch(`/api/luma/guests?event_id=${encodeURIComponent(eventId)}`);
+        const data = await res.json();
+        if (res.ok) {
+          setGuestsByEvent(prev => {
+            const next = new Map(prev);
+            next.set(eventId, data.guests);
+            return next;
+          });
+        } else {
+          setGuestsError(data.error ?? 'Failed to load attendees');
+          setSelectedEventIds(prev => prev.filter(id => id !== eventId));
+        }
+      } catch {
+        setGuestsError('Failed to load attendees');
+        setSelectedEventIds(prev => prev.filter(id => id !== eventId));
+      } finally {
+        setLoadingForEventIds(prev => {
+          const next = new Set(prev);
+          next.delete(eventId);
+          return next;
+        });
+      }
+    },
+    [selectedEventIds]
+  );
+
+  const handleEventSearchChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setEventSearch(e.target.value);
+  }, []);
+
+  const handleAttendeeFilterChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setAttendeeFilter(e.target.value);
+  }, []);
+
+  const filteredEventList = useMemo(() => {
+    if (!eventSearch.trim()) return events;
+    const q = eventSearch.toLowerCase();
+    return events.filter(e => e.name.toLowerCase().includes(q));
+  }, [events, eventSearch]);
+
+  // Merge all selected events' guests, deduped by email
+  const combinedAttendees = useMemo((): CombinedAttendee[] => {
+    const byEmail = new Map<string, CombinedAttendee>();
+
+    for (const eventId of selectedEventIds) {
+      const event = events.find(e => e.api_id === eventId);
+      const guests = guestsByEvent.get(eventId) ?? [];
+      if (!event) continue;
+
+      for (const guest of guests) {
+        const key = (guest.email ?? guest.user_email ?? guest.api_id).toLowerCase();
+        const existing = byEmail.get(key);
+        if (existing) {
+          existing.attendances.push({ event, guest });
+        } else {
+          byEmail.set(key, { guest, attendances: [{ event, guest }] });
+        }
+      }
     }
-  }, []);
 
-  const handleFilterChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    setFilter(e.target.value);
-  }, []);
+    return Array.from(byEmail.values());
+  }, [selectedEventIds, guestsByEvent, events]);
 
-  const filteredGuests = useMemo(() => {
-    if (!filter.trim()) return guests;
-    const q = filter.toLowerCase();
-    return guests.filter(g => {
-      const name = (g.name ?? g.user_name ?? '').toLowerCase();
-      const email = (g.email ?? g.user_email ?? '').toLowerCase();
-      const company = (getGuestCompany(g) ?? '').toLowerCase();
+  const filteredAttendees = useMemo(() => {
+    if (!attendeeFilter.trim()) return combinedAttendees;
+    const q = attendeeFilter.toLowerCase();
+    return combinedAttendees.filter(({ guest }) => {
+      const name = (guest.name ?? guest.user_name ?? '').toLowerCase();
+      const email = (guest.email ?? guest.user_email ?? '').toLowerCase();
+      const company = (getGuestCompany(guest) ?? '').toLowerCase();
       return name.includes(q) || email.includes(q) || company.includes(q);
     });
-  }, [guests, filter]);
+  }, [combinedAttendees, attendeeFilter]);
 
-  if (loadingEvents) {
-    return <div className="text-sm text-gray-400">Loading events…</div>;
-  }
+  const isLoadingGuests = loadingForEventIds.size > 0;
+  const multiEvent = selectedEventIds.length > 1;
 
-  if (eventsError) {
-    return <ErrorBanner message={eventsError} />;
-  }
+  if (loadingEvents) return <div className="text-sm text-gray-400">Loading events…</div>;
+  if (eventsError) return <ErrorBanner message={eventsError} />;
 
   return (
     <div className="space-y-6">
-      <div>
-        <label
-          className="mb-1.5 block text-sm font-medium text-gray-700"
-          htmlFor="event-select"
-        >
-          Select event
-        </label>
-        <select
-          id="event-select"
-          value={selectedEventId}
-          onChange={handleEventChange}
-          className="w-full rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm text-gray-900 shadow-sm outline-none focus:border-gray-500 focus:ring-2 focus:ring-gray-200"
-        >
-          <option value="">— Choose an event —</option>
-          {events.map(event => (
-            <option key={event.api_id} value={event.api_id}>
-              {formatDate(event.start_at)} · {event.name}
-            </option>
-          ))}
-        </select>
+      {/* Event picker with checkboxes */}
+      <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+        <div className="border-b border-gray-100 px-4 py-3">
+          <input
+            type="text"
+            value={eventSearch}
+            onChange={handleEventSearchChange}
+            placeholder="Filter events…"
+            className="w-full bg-transparent text-sm text-gray-900 placeholder-gray-400 outline-none"
+          />
+        </div>
+        <div className="max-h-64 overflow-y-auto">
+          {filteredEventList.length === 0 ? (
+            <div className="px-4 py-3 text-sm text-gray-400">No events match</div>
+          ) : (
+            filteredEventList.map(event => {
+              const isSelected = selectedEventIds.includes(event.api_id);
+              const isLoadingThis = loadingForEventIds.has(event.api_id);
+              return (
+                <label
+                  key={event.api_id}
+                  className="flex cursor-pointer items-center gap-3 px-4 py-2.5 hover:bg-gray-50"
+                >
+                  <input
+                    type="checkbox"
+                    checked={isSelected}
+                    disabled={isLoadingThis}
+                    onChange={() => handleToggleEvent(event.api_id)}
+                    className="h-4 w-4 rounded border-gray-300 text-gray-900 focus:ring-gray-500"
+                  />
+                  <span className="flex-1 text-sm text-gray-700">{event.name}</span>
+                  <span className="shrink-0 text-xs text-gray-400">
+                    {isLoadingThis ? 'Loading…' : formatShortDate(event.start_at)}
+                  </span>
+                </label>
+              );
+            })
+          )}
+        </div>
+        {selectedEventIds.length > 0 && (
+          <div className="border-t border-gray-100 px-4 py-2 text-xs text-gray-400">
+            {selectedEventIds.length} event{selectedEventIds.length !== 1 ? 's' : ''} selected
+            {isLoadingGuests && ' · Loading…'}
+          </div>
+        )}
       </div>
 
       {guestsError && <ErrorBanner message={guestsError} />}
 
-      {loadingGuests && (
-        <div className="text-sm text-gray-400">Loading attendees…</div>
-      )}
-
-      {!loadingGuests && selectedEventId && guests.length === 0 && !guestsError && (
+      {!isLoadingGuests && selectedEventIds.length > 0 && combinedAttendees.length === 0 && (
         <div className="rounded-lg border border-gray-200 bg-white px-4 py-10 text-center text-sm text-gray-400">
-          No attendees found for this event.
+          No attendees found for the selected event{multiEvent ? 's' : ''}.
         </div>
       )}
 
-      {!loadingGuests && guests.length > 0 && (
+      {!isLoadingGuests && combinedAttendees.length > 0 && (
         <>
           <div className="flex items-center gap-3">
             <input
               type="text"
-              value={filter}
-              onChange={handleFilterChange}
+              value={attendeeFilter}
+              onChange={handleAttendeeFilterChange}
               placeholder="Filter by name, email, or company…"
               className="flex-1 rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm text-gray-900 placeholder-gray-400 shadow-sm outline-none focus:border-gray-500 focus:ring-2 focus:ring-gray-200"
             />
             <span className="shrink-0 text-sm text-gray-400">
-              {filteredGuests.length}{' '}
-              {filteredGuests.length !== guests.length && `of ${guests.length} `}
-              attendee{filteredGuests.length !== 1 ? 's' : ''}
+              {filteredAttendees.length}
+              {filteredAttendees.length !== combinedAttendees.length &&
+                ` of ${combinedAttendees.length}`}{' '}
+              attendee{filteredAttendees.length !== 1 ? 's' : ''}
             </span>
           </div>
 
@@ -479,27 +545,33 @@ function AttendeesTab() {
                   <th className="px-5 py-3">Company</th>
                   <th className="px-5 py-3">LinkedIn</th>
                   <th className="px-5 py-3">Status</th>
-                  <th className="px-5 py-3">Registered</th>
+                  {multiEvent ? (
+                    <th className="px-5 py-3">Events attended</th>
+                  ) : (
+                    <th className="px-5 py-3">Registered</th>
+                  )}
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
-                {filteredGuests.map(guest => {
+                {filteredAttendees.map(({ guest, attendances }) => {
                   const linkedin = getGuestLinkedin(guest);
                   const company = getGuestCompany(guest);
+                  const status = bestStatus(attendances);
+                  const email = guest.email ?? guest.user_email ?? '';
+
                   return (
                     <tr key={guest.api_id} className="hover:bg-gray-50">
                       <td className="px-5 py-3.5 font-medium text-gray-900">
                         {guest.name ?? guest.user_name ?? '—'}
                       </td>
                       <td className="px-5 py-3.5 text-gray-500">
-                        {(guest.email ?? guest.user_email) ? (
-                          <a
-                            href={`mailto:${guest.email ?? guest.user_email}`}
-                            className="hover:text-gray-700"
-                          >
-                            {guest.email ?? guest.user_email}
+                        {email ? (
+                          <a href={`mailto:${email}`} className="hover:text-gray-700">
+                            {email}
                           </a>
-                        ) : '—'}
+                        ) : (
+                          '—'
+                        )}
                       </td>
                       <td className="px-5 py-3.5 text-gray-500">{company ?? '—'}</td>
                       <td className="px-5 py-3.5">
@@ -518,13 +590,25 @@ function AttendeesTab() {
                         )}
                       </td>
                       <td className="px-5 py-3.5">
-                        <StatusBadge
-                          status={guest.checked_in_at ? 'checked_in' : guest.approval_status}
-                        />
+                        <StatusBadge status={status} />
                       </td>
-                      <td className="px-5 py-3.5 text-gray-500">
-                        {formatDate(guest.registered_at)}
-                      </td>
+                      {multiEvent ? (
+                        <td
+                          className="px-5 py-3.5 text-xs text-gray-500"
+                          title={attendances.map(a => a.event.name).join('\n')}
+                        >
+                          {attendances.map(a => formatShortDate(a.event.start_at)).join(' · ')}
+                          {attendances.length < selectedEventIds.length && (
+                            <span className="ml-1.5 text-gray-300">
+                              ({attendances.length}/{selectedEventIds.length})
+                            </span>
+                          )}
+                        </td>
+                      ) : (
+                        <td className="px-5 py-3.5 text-gray-500">
+                          {formatDate(attendances[0]?.guest.registered_at ?? '')}
+                        </td>
+                      )}
                     </tr>
                   );
                 })}
@@ -537,349 +621,15 @@ function AttendeesTab() {
   );
 }
 
-// -- Create event tab --------------------------------------------------------
-
-interface CreateEventFields {
-  name: string;
-  startDate: string;
-  startTime: string;
-  endDate: string;
-  endTime: string;
-  timezone: string;
-  description: string;
-  meetingUrl: string;
-  maxCapacity: string;
-  requireApproval: boolean;
-}
-
-const EMPTY_FORM: CreateEventFields = {
-  name: '',
-  startDate: '',
-  startTime: '',
-  endDate: '',
-  endTime: '',
-  timezone: 'America/Los_Angeles',
-  description: '',
-  meetingUrl: '',
-  maxCapacity: '',
-  requireApproval: false,
-};
-
-interface CreatedEventResult {
-  api_id: string;
-  url: string;
-  name: string;
-}
-
-function CreateEventTab() {
-  const [fields, setFields] = useState<CreateEventFields>(EMPTY_FORM);
-  const [loading, setLoading] = useState(false);
-  const [created, setCreated] = useState<CreatedEventResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const handleChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
-      const { name, value, type } = e.target;
-      const checked = type === 'checkbox' ? (e.target as HTMLInputElement).checked : undefined;
-      setFields(prev => ({ ...prev, [name]: checked !== undefined ? checked : value }));
-    },
-    []
-  );
-
-  const handleSubmit = useCallback(
-    async (e: React.FormEvent) => {
-      e.preventDefault();
-      setLoading(true);
-      setCreated(null);
-      setError(null);
-
-      try {
-        const startIso = toIso(`${fields.startDate}T${fields.startTime}`);
-        const endIso =
-          fields.endDate && fields.endTime
-            ? toIso(`${fields.endDate}T${fields.endTime}`)
-            : undefined;
-
-        const body: Record<string, unknown> = {
-          name: fields.name,
-          start_at: startIso,
-          timezone: fields.timezone,
-          require_rsvp_approval: fields.requireApproval,
-        };
-        if (endIso) body.end_at = endIso;
-        if (fields.description.trim()) body.description_md = fields.description.trim();
-        if (fields.meetingUrl.trim()) body.meeting_url = fields.meetingUrl.trim();
-        if (fields.maxCapacity) body.max_capacity = parseInt(fields.maxCapacity, 10);
-
-        const res = await fetch('/api/luma/create', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-
-        const data = await res.json();
-        if (!res.ok) {
-          setError(data.error ?? 'Something went wrong');
-          return;
-        }
-
-        setCreated(data);
-        setFields(EMPTY_FORM);
-      } catch {
-        setError('Failed to reach the server. Please try again.');
-      } finally {
-        setLoading(false);
-      }
-    },
-    [fields]
-  );
-
-  const handleReset = useCallback(() => {
-    setCreated(null);
-    setError(null);
-  }, []);
-
-  if (created) {
-    return (
-      <div className="rounded-xl border border-green-200 bg-green-50 p-6">
-        <div className="flex items-start gap-3">
-          <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-green-500">
-            <svg
-              className="h-3 w-3 text-white"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={3}
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-            </svg>
-          </div>
-          <div className="flex-1">
-            <p className="font-medium text-green-900">{created.name} created</p>
-            <a
-              href={created.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-1 block text-sm text-green-700 underline hover:text-green-900"
-            >
-              Open in Luma
-            </a>
-            <div className="mt-4 rounded-lg border border-green-200 bg-white p-4">
-              <p className="text-xs font-medium uppercase tracking-wide text-gray-400">
-                Verify registration questions in Luma
-              </p>
-              <ul className="mt-2 space-y-1 text-sm text-gray-600">
-                {['First name', 'Last name', 'Email', 'Company', 'LinkedIn Profile URL'].map(
-                  field => (
-                    <li key={field} className="flex items-center gap-2">
-                      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-gray-300" />
-                      {field}
-                    </li>
-                  )
-                )}
-              </ul>
-              <p className="mt-3 text-xs text-gray-400">
-                First name, last name, and email are always collected by Luma. Company and
-                LinkedIn were sent via API — confirm they appear on the Registration tab.
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={handleReset}
-              className="mt-4 text-sm text-green-700 underline hover:text-green-900"
-            >
-              Create another event
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <form onSubmit={handleSubmit} className="space-y-5">
-      {error && <ErrorBanner message={error} />}
-
-      <div>
-        <label className="mb-1.5 block text-sm font-medium text-gray-700" htmlFor="name">
-          Event name <span className="text-red-500">*</span>
-        </label>
-        <input
-          id="name"
-          name="name"
-          type="text"
-          value={fields.name}
-          onChange={handleChange}
-          required
-          placeholder="Air Community Meetup"
-          className="w-full rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm text-gray-900 placeholder-gray-400 shadow-sm outline-none focus:border-gray-500 focus:ring-2 focus:ring-gray-200"
-        />
-      </div>
-
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <label className="mb-1.5 block text-sm font-medium text-gray-700" htmlFor="startDate">
-            Start date <span className="text-red-500">*</span>
-          </label>
-          <input
-            id="startDate"
-            name="startDate"
-            type="date"
-            value={fields.startDate}
-            onChange={handleChange}
-            required
-            className="w-full rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm text-gray-900 shadow-sm outline-none focus:border-gray-500 focus:ring-2 focus:ring-gray-200"
-          />
-        </div>
-        <div>
-          <label className="mb-1.5 block text-sm font-medium text-gray-700" htmlFor="startTime">
-            Start time <span className="text-red-500">*</span>
-          </label>
-          <input
-            id="startTime"
-            name="startTime"
-            type="time"
-            value={fields.startTime}
-            onChange={handleChange}
-            required
-            className="w-full rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm text-gray-900 shadow-sm outline-none focus:border-gray-500 focus:ring-2 focus:ring-gray-200"
-          />
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <label className="mb-1.5 block text-sm font-medium text-gray-700" htmlFor="endDate">
-            End date
-          </label>
-          <input
-            id="endDate"
-            name="endDate"
-            type="date"
-            value={fields.endDate}
-            onChange={handleChange}
-            className="w-full rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm text-gray-900 shadow-sm outline-none focus:border-gray-500 focus:ring-2 focus:ring-gray-200"
-          />
-        </div>
-        <div>
-          <label className="mb-1.5 block text-sm font-medium text-gray-700" htmlFor="endTime">
-            End time
-          </label>
-          <input
-            id="endTime"
-            name="endTime"
-            type="time"
-            value={fields.endTime}
-            onChange={handleChange}
-            className="w-full rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm text-gray-900 shadow-sm outline-none focus:border-gray-500 focus:ring-2 focus:ring-gray-200"
-          />
-        </div>
-      </div>
-
-      <div>
-        <label className="mb-1.5 block text-sm font-medium text-gray-700" htmlFor="timezone">
-          Timezone <span className="text-red-500">*</span>
-        </label>
-        <select
-          id="timezone"
-          name="timezone"
-          value={fields.timezone}
-          onChange={handleChange}
-          required
-          className="w-full rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm text-gray-900 shadow-sm outline-none focus:border-gray-500 focus:ring-2 focus:ring-gray-200"
-        >
-          {TIMEZONES.map(tz => (
-            <option key={tz} value={tz}>
-              {tz}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      <div>
-        <label className="mb-1.5 block text-sm font-medium text-gray-700" htmlFor="meetingUrl">
-          Virtual meeting URL
-        </label>
-        <input
-          id="meetingUrl"
-          name="meetingUrl"
-          type="url"
-          value={fields.meetingUrl}
-          onChange={handleChange}
-          placeholder="https://zoom.us/j/…"
-          className="w-full rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm text-gray-900 placeholder-gray-400 shadow-sm outline-none focus:border-gray-500 focus:ring-2 focus:ring-gray-200"
-        />
-      </div>
-
-      <div>
-        <label className="mb-1.5 block text-sm font-medium text-gray-700" htmlFor="description">
-          Description{' '}
-          <span className="font-normal text-gray-400">(Markdown supported)</span>
-        </label>
-        <textarea
-          id="description"
-          name="description"
-          value={fields.description}
-          onChange={handleChange}
-          rows={4}
-          placeholder="Tell attendees what to expect…"
-          className="w-full rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm text-gray-900 placeholder-gray-400 shadow-sm outline-none focus:border-gray-500 focus:ring-2 focus:ring-gray-200"
-        />
-      </div>
-
-      <div>
-        <label className="mb-1.5 block text-sm font-medium text-gray-700" htmlFor="maxCapacity">
-          Max capacity
-        </label>
-        <input
-          id="maxCapacity"
-          name="maxCapacity"
-          type="number"
-          min="1"
-          value={fields.maxCapacity}
-          onChange={handleChange}
-          placeholder="Leave blank for unlimited"
-          className="w-full rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm text-gray-900 placeholder-gray-400 shadow-sm outline-none focus:border-gray-500 focus:ring-2 focus:ring-gray-200"
-        />
-      </div>
-
-      <label className="flex cursor-pointer items-center gap-3">
-        <input
-          name="requireApproval"
-          type="checkbox"
-          checked={fields.requireApproval}
-          onChange={handleChange}
-          className="h-4 w-4 rounded border-gray-300 text-gray-900 focus:ring-gray-500"
-        />
-        <span className="text-sm text-gray-700">Require RSVP approval</span>
-      </label>
-
-      <div className="rounded-lg border border-gray-100 bg-gray-50 px-4 py-3 text-xs text-gray-500">
-        Standard registration questions (first name, last name, email, company, LinkedIn) will be
-        added automatically.
-      </div>
-
-      <button
-        type="submit"
-        disabled={loading}
-        className="rounded-lg bg-gray-900 px-5 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-gray-700 disabled:opacity-50"
-      >
-        {loading ? 'Creating…' : 'Create event'}
-      </button>
-    </form>
-  );
-}
-
 // -- Page --------------------------------------------------------------------
 
-type Tab = 'search' | 'attendees' | 'create';
+type Tab = 'search' | 'attendees';
 
 export default function EventsDashboard() {
   const [tab, setTab] = useState<Tab>('search');
 
   const handleTabSearch = useCallback(() => setTab('search'), []);
   const handleTabAttendees = useCallback(() => setTab('attendees'), []);
-  const handleTabCreate = useCallback(() => setTab('create'), []);
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -899,14 +649,10 @@ export default function EventsDashboard() {
           >
             Event attendees
           </button>
-          <button type="button" onClick={handleTabCreate} className={tabClass(tab === 'create')}>
-            Create event
-          </button>
         </div>
 
         {tab === 'search' && <SearchTab />}
         {tab === 'attendees' && <AttendeesTab />}
-        {tab === 'create' && <CreateEventTab />}
       </div>
     </div>
   );
