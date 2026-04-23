@@ -77,18 +77,32 @@ function guestName(guest: LumaGuest): string {
   return guest.name ?? guest.user_name ?? '';
 }
 
+function normalizeLinkedinUrl(raw: string): string {
+  const s = raw.trim();
+  if (s.startsWith('http://') || s.startsWith('https://')) return s;
+  if (s.startsWith('//')) return `https:${s}`;
+  if (s.startsWith('/in/') || s.startsWith('in/'))
+    return `https://www.linkedin.com${s.startsWith('/') ? s : `/${s}`}`;
+  if (s.startsWith('linkedin.com') || s.startsWith('www.linkedin.com')) return `https://${s}`;
+  return s;
+}
+
 function extractLinkedinUrl(guest: LumaGuest): string | null {
   if (!guest.registration_answers || guest.registration_answers.length === 0) return null;
 
   const byUrl = guest.registration_answers.find(
-    a => a.answer && a.answer.toLowerCase().includes('linkedin.com')
+    a =>
+      a.answer &&
+      (a.answer.toLowerCase().includes('linkedin.com') ||
+        a.answer.toLowerCase().startsWith('/in/') ||
+        a.answer.toLowerCase().startsWith('in/'))
   );
-  if (byUrl) return byUrl.answer.trim();
+  if (byUrl?.answer) return normalizeLinkedinUrl(byUrl.answer);
 
   const byLabel = guest.registration_answers.find(a =>
     a.label.toLowerCase().includes('linkedin')
   );
-  if (byLabel?.answer) return byLabel.answer.trim();
+  if (byLabel?.answer) return normalizeLinkedinUrl(byLabel.answer);
 
   return null;
 }
