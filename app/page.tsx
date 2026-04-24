@@ -163,6 +163,31 @@ function SortableHeader({
   );
 }
 
+function StatPill({
+  label,
+  value,
+  color,
+}: {
+  label: string;
+  value: number;
+  color: 'gray' | 'green' | 'blue' | 'yellow' | 'red' | 'purple';
+}) {
+  const colors = {
+    gray: 'bg-gray-100 text-gray-600',
+    green: 'bg-green-100 text-green-700',
+    blue: 'bg-blue-100 text-blue-700',
+    yellow: 'bg-yellow-100 text-yellow-700',
+    red: 'bg-red-100 text-red-700',
+    purple: 'bg-purple-100 text-purple-700',
+  };
+  return (
+    <div className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium ${colors[color]}`}>
+      <span className="text-sm font-semibold">{value}</span>
+      {label}
+    </div>
+  );
+}
+
 // -- PersonDetail ------------------------------------------------------------
 
 interface CustomerInfo {
@@ -693,6 +718,21 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
     });
   }, [filteredAttendees, sortCol, sortDir, customerStatuses]);
 
+  const stats = useMemo(() => {
+    let checkedIn = 0, approved = 0, pending = 0, waitlisted = 0, declined = 0, customers = 0;
+    for (const { guest, attendances } of combinedAttendees) {
+      const s = bestStatus(attendances);
+      if (s === 'checked_in') checkedIn++;
+      else if (s === 'approved') approved++;
+      else if (s === 'pending_approval') pending++;
+      else if (s === 'waitlisted') waitlisted++;
+      else if (s === 'declined') declined++;
+      const email = (guest.email ?? guest.user_email ?? '').toLowerCase();
+      if (customerStatuses.get(email)?.isCustomer) customers++;
+    }
+    return { total: combinedAttendees.length, checkedIn, approved, pending, waitlisted, declined, customers };
+  }, [combinedAttendees, customerStatuses]);
+
   const isLoadingGuests = loadingForEventIds.size > 0;
   const multiEvent = selectedEventIds.length > 1;
 
@@ -749,6 +789,16 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
                     className="h-4 w-4 rounded border-gray-300 text-gray-900 focus:ring-gray-500"
                   />
                   <span className="flex-1 text-sm text-gray-700">{event.name}</span>
+                  <a
+                    href={event.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={e => e.stopPropagation()}
+                    className="shrink-0 text-gray-300 hover:text-blue-500"
+                    title="Open on Luma"
+                  >
+                    ↗
+                  </a>
                   <span className="shrink-0 text-xs text-gray-400">
                     {isLoadingThis ? 'Loading…' : formatShortDate(event.start_at)}
                   </span>
@@ -776,6 +826,19 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
 
       {!isLoadingGuests && combinedAttendees.length > 0 && (
         <>
+          {/* Stats bar */}
+          <div className="flex flex-wrap gap-2">
+            <StatPill label="Total" value={stats.total} color="gray" />
+            {stats.approved > 0 && <StatPill label="Approved" value={stats.approved} color="green" />}
+            {stats.checkedIn > 0 && <StatPill label="Checked in" value={stats.checkedIn} color="blue" />}
+            {stats.pending > 0 && <StatPill label="Pending" value={stats.pending} color="yellow" />}
+            {stats.waitlisted > 0 && <StatPill label="Waitlisted" value={stats.waitlisted} color="gray" />}
+            {stats.declined > 0 && <StatPill label="Declined" value={stats.declined} color="red" />}
+            {!loadingCustomer && stats.customers > 0 && (
+              <StatPill label="Customers" value={stats.customers} color="purple" />
+            )}
+          </div>
+
           <div className="flex items-center gap-3">
             <input
               type="text"
@@ -784,12 +847,11 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
               placeholder="Filter by name, email, or company…"
               className="flex-1 rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm text-gray-900 placeholder-gray-400 shadow-sm outline-none focus:border-gray-500 focus:ring-2 focus:ring-gray-200"
             />
-            <span className="shrink-0 text-sm text-gray-400">
-              {sortedAttendees.length}
-              {sortedAttendees.length !== combinedAttendees.length &&
-                ` of ${combinedAttendees.length}`}{' '}
-              attendee{sortedAttendees.length !== 1 ? 's' : ''}
-            </span>
+            {sortedAttendees.length !== combinedAttendees.length && (
+              <span className="shrink-0 text-sm text-gray-400">
+                {sortedAttendees.length} of {combinedAttendees.length}
+              </span>
+            )}
           </div>
 
           <div className="overflow-x-auto overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
