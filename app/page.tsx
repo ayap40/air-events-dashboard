@@ -733,6 +733,52 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
     return { total: combinedAttendees.length, checkedIn, approved, pending, waitlisted, declined, customers };
   }, [combinedAttendees, customerStatuses]);
 
+  const handleDownload = useCallback(() => {
+    if (sortedAttendees.length === 0) return;
+
+    const selectedEvents = selectedEventIds.map(id => events.find(e => e.api_id === id)).filter(Boolean);
+    const isMulti = selectedEventIds.length > 1;
+
+    const headers = [
+      'Name', 'Email', 'Company', 'LinkedIn', 'Status', 'Customer',
+      isMulti ? '# Events' : 'Registered',
+      isMulti ? 'Events attended' : '',
+    ].filter(Boolean);
+
+    const escape = (v: string) => `"${v.replace(/"/g, '""')}"`;
+
+    const rows = sortedAttendees.map(({ guest, attendances }) => {
+      const email = guest.email ?? guest.user_email ?? '';
+      const cs = customerStatuses.get(email.toLowerCase());
+      const status = bestStatus(attendances);
+      const row = [
+        escape(guest.name ?? guest.user_name ?? ''),
+        escape(email),
+        escape(getGuestCompany(guest) ?? ''),
+        escape(getGuestLinkedin(guest) ?? ''),
+        escape(STATUS_LABELS[status] ?? status),
+        escape(cs === undefined ? '' : cs.isCustomer ? 'Yes' : 'No'),
+        isMulti
+          ? String(attendances.length)
+          : escape(formatDate(attendances[0]?.guest.registered_at ?? '')),
+      ];
+      if (isMulti) row.push(escape(attendances.map(a => a.event.name).join('; ')));
+      return row.join(',');
+    });
+
+    const csv = [headers.map(escape).join(','), ...rows].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    const filename = selectedEvents.length === 1
+      ? `${selectedEvents[0]!.name.replace(/[^a-z0-9]/gi, '-').toLowerCase()}-attendees.csv`
+      : `attendees-${selectedEvents.length}-events.csv`;
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(url);
+  }, [sortedAttendees, selectedEventIds, events, customerStatuses]);
+
   const isLoadingGuests = loadingForEventIds.size > 0;
   const multiEvent = selectedEventIds.length > 1;
 
@@ -852,6 +898,13 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
                 {sortedAttendees.length} of {combinedAttendees.length}
               </span>
             )}
+            <button
+              type="button"
+              onClick={handleDownload}
+              className="shrink-0 rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-600 shadow-sm transition hover:bg-gray-50"
+            >
+              Download CSV
+            </button>
           </div>
 
           <div className="overflow-x-auto overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
