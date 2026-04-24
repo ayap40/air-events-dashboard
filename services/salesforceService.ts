@@ -20,7 +20,7 @@ export interface CustomerStatus {
   tShirtSize: string | null;
 }
 
-// -- Token cache ------------------------------------------------------------
+// -- Token ------------------------------------------------------------------
 
 interface TokenCache {
   access_token: string;
@@ -28,20 +28,14 @@ interface TokenCache {
   expires_at: number;
 }
 
-let _token: TokenCache | null = null;
-
 async function getToken(): Promise<TokenCache> {
-  if (_token && Date.now() < _token.expires_at) return _token;
-
-  const instanceUrl = (process.env.SALESFORCE_INSTANCE_URL ?? '').replace(/\/$/, '');
-
   const params = new URLSearchParams({
     grant_type: 'client_credentials',
     client_id: process.env.SALESFORCE_CLIENT_ID ?? '',
     client_secret: process.env.SALESFORCE_CLIENT_SECRET ?? '',
   });
 
-  const res = await fetch(`${instanceUrl}/services/oauth2/token`, {
+  const res = await fetch('https://login.salesforce.com/services/oauth2/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: params,
@@ -53,12 +47,12 @@ async function getToken(): Promise<TokenCache> {
   }
 
   const data = await res.json();
-  _token = {
+  const instanceUrl = (process.env.SALESFORCE_INSTANCE_URL ?? '').replace(/\/$/, '');
+  return {
     access_token: data.access_token,
     instance_url: data.instance_url ?? instanceUrl,
-    expires_at: Date.now() + 115 * 60 * 1000,
+    expires_at: 0,
   };
-  return _token;
 }
 
 // -- Public API -------------------------------------------------------------
