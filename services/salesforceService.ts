@@ -35,7 +35,9 @@ async function getToken(): Promise<TokenCache> {
     client_secret: process.env.SALESFORCE_CLIENT_SECRET ?? '',
   });
 
-  const res = await fetch('https://login.salesforce.com/services/oauth2/token', {
+  const instanceUrl = (process.env.SALESFORCE_INSTANCE_URL ?? '').replace(/\/$/, '');
+
+  const res = await fetch(`${instanceUrl}/services/oauth2/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: params,
@@ -47,7 +49,6 @@ async function getToken(): Promise<TokenCache> {
   }
 
   const data = await res.json();
-  const instanceUrl = (process.env.SALESFORCE_INSTANCE_URL ?? '').replace(/\/$/, '');
   return {
     access_token: data.access_token,
     instance_url: data.instance_url ?? instanceUrl,
