@@ -1,8 +1,9 @@
 // Uses OAuth 2.0 Client Credentials flow — no user password required.
 // Looks up customer status by:
 //   1. Direct Contact email lookup → related Account (primary path, works for all emails)
-//   2. Domain-based Account.Website matching (fallback for corporate emails with no Contact record)
-// Requires Account and Contact read access on the Run As user's profile.
+//   2. Lead email lookup → Matched_Account__r (catches leads whose matched account is a customer)
+//   3. Domain-based Account.Website matching (fallback for corporate emails with no SF record)
+// Requires Account, Contact, and Lead read access on the Run As user's profile.
 
 const SF_API_VERSION = 'v59.0';
 const BATCH_SIZE = 50;
@@ -109,10 +110,42 @@ export async function getCustomerStatuses(
     }
   }
 
-  // Step 2: Domain-based Account.Website lookup for corporate emails with no Contact record.
+  // Step 2: Lead email lookup → Matched_Account__r.
+  // Catches people who exist as Leads (not yet Contacts) but whose matched account is a customer.
+  const unmatchedAfterContact = emails.filter(e => !result.has(e));
+
+  for (let i = 0; i < unmatchedAfterContact.length; i += BATCH_SIZE) {
+    const batch = unmatchedAfterContact.slice(i, i + BATCH_SIZE);
+    const emailList = batch.map(e => `'${e.replace(/'/g, "\\'")}'`).join(', ');
+
+    const soql = [
+      'SELECT Email, Matched_Account__r.Total_Product_Instance_ARR__c, Matched_Account__r.T_Shirt_Size__c',
+      'FROM Lead',
+      `WHERE Email IN (${emailList})`,
+      'AND Matched_Account__c != null',
+    ].join(' ');
+
+    const res = await fetch(
+      `${token.instance_url}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`,
+      { headers: { Authorization: `Bearer ${token.access_token}` } }
+    );
+
+    if (!res.ok) continue;
+
+    const data = await res.json();
+
+    for (const record of (data.records ?? []) as Record<string, unknown>[]) {
+      const email = ((record.Email as string) ?? '').toLowerCase();
+      const account = record.Matched_Account__r as Record<string, unknown> | null;
+      if (!email || !account) continue;
+      result.set(email, statusFromAccount(account));
+    }
+  }
+
+  // Step 3: Domain-based Account.Website lookup for corporate emails with no SF record.
   // Catches people from customer companies who haven't been added to Salesforce yet.
   const unmatchedCorporateEmails = emails.filter(e => {
-    if (result.has(e)) return false;
+    if (result.has(e)) return false; // already resolved by Contact or Lead lookup
     const domain = e.split('@')[1] ?? '';
     return domain && !FREE_EMAIL_DOMAINS.has(domain);
   });
