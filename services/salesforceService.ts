@@ -2,7 +2,9 @@
 // Looks up customer status by:
 //   1. Direct Contact email lookup → related Account (primary path, works for all emails)
 //   2. Lead email lookup → Matched_Account__r (catches leads whose matched account is a customer)
-//   3. Domain-based Account.Website matching (fallback for corporate emails with no SF record)
+//   3. Domain Contact lookup — finds any SF Contact sharing the same email domain and inherits
+//      their Account's customer status (catches employees not yet in SF individually)
+//   4. Domain-based Account.Website matching (last resort for corporate emails with no SF record)
 // Requires Account, Contact, and Lead read access on the Run As user's profile.
 
 const SF_API_VERSION = 'v59.0';
@@ -142,10 +144,67 @@ export async function getCustomerStatuses(
     }
   }
 
-  // Step 3: Domain-based Account.Website lookup for corporate emails with no SF record.
+  // Step 3: Domain Contact lookup — query any Contact sharing the same email domain and
+  // inherit their Account's customer status. More reliable than Website matching because
+  // it uses actual Contact records rather than a Website field that may be missing/inconsistent.
+  const unmatchedAfterLead = emails.filter(e => !result.has(e));
+  const unmatchedCorporateDomains = [
+    ...new Set(
+      unmatchedAfterLead
+        .map(e => e.split('@')[1] ?? '')
+        .filter(d => d && !FREE_EMAIL_DOMAINS.has(d))
+    ),
+  ];
+
+  for (let i = 0; i < unmatchedCorporateDomains.length; i += BATCH_SIZE) {
+    const batch = unmatchedCorporateDomains.slice(i, i + BATCH_SIZE);
+
+    const domainConditions = batch
+      .map(d => `Email LIKE '%@${d.replace(/'/g, "\\'")}'`)
+      .join(' OR ');
+
+    const soql = [
+      'SELECT Email, Account.Total_Product_Instance_ARR__c, Account.T_Shirt_Size__c',
+      'FROM Contact',
+      `WHERE (${domainConditions})`,
+      'AND AccountId != null',
+    ].join(' ');
+
+    const res = await fetch(
+      `${token.instance_url}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`,
+      { headers: { Authorization: `Bearer ${token.access_token}` } }
+    );
+
+    if (!res.ok) continue;
+
+    const data = await res.json();
+
+    // Build domain → best CustomerStatus map from the returned contacts
+    const domainStatus = new Map<string, CustomerStatus>();
+    for (const record of (data.records ?? []) as Record<string, unknown>[]) {
+      const contactEmail = ((record.Email as string) ?? '').toLowerCase();
+      const domain = contactEmail.split('@')[1] ?? '';
+      const account = record.Account as Record<string, unknown> | null;
+      if (!domain || !account) continue;
+      const status = statusFromAccount(account);
+      const existing = domainStatus.get(domain);
+      if (!existing || (!existing.isCustomer && status.isCustomer)) {
+        domainStatus.set(domain, status);
+      }
+    }
+
+    // Apply domain status to all unmatched emails sharing that domain
+    for (const email of unmatchedAfterLead) {
+      const domain = email.split('@')[1] ?? '';
+      const status = domainStatus.get(domain);
+      if (status) result.set(email, status);
+    }
+  }
+
+  // Step 4: Domain-based Account.Website lookup for corporate emails with no SF record.
   // Catches people from customer companies who haven't been added to Salesforce yet.
   const unmatchedCorporateEmails = emails.filter(e => {
-    if (result.has(e)) return false; // already resolved by Contact or Lead lookup
+    if (result.has(e)) return false; // already resolved by Contact, Lead, or domain Contact lookup
     const domain = e.split('@')[1] ?? '';
     return domain && !FREE_EMAIL_DOMAINS.has(domain);
   });
