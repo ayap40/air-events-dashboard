@@ -205,6 +205,8 @@ function PersonDetail({
   customerInfo?: CustomerInfo | null;
   onBack?: () => void;
 }) {
+  const attendedEvents = result.events.filter(e => e.guest.checked_in_at !== null);
+
   return (
     <div className="space-y-6">
       {onBack && (
@@ -244,7 +246,7 @@ function PersonDetail({
               </a>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-start gap-2">
             {customerInfo !== undefined && (
               customerInfo?.isCustomer ? (
                 <span className="inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium bg-purple-100 text-purple-800">
@@ -256,11 +258,36 @@ function PersonDetail({
                 </span>
               )
             )}
-            <div className="shrink-0 rounded-full bg-gray-100 px-3 py-1 text-sm font-medium text-gray-600">
-              {result.events.length} event{result.events.length !== 1 ? 's' : ''}
+            <div className="shrink-0 text-right">
+              <div className="rounded-full bg-gray-100 px-3 py-1 text-sm font-medium text-gray-600">
+                {attendedEvents.length} attended
+              </div>
+              {result.events.length !== attendedEvents.length && (
+                <p className="mt-1 text-xs text-gray-400">{result.events.length} registered</p>
+              )}
             </div>
           </div>
         </div>
+        {attendedEvents.length > 1 && (
+          <div className="mt-4 border-t border-gray-100 pt-4">
+            <p className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-400">
+              Events attended
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              {attendedEvents.map(({ event }) => (
+                <a
+                  key={event.api_id}
+                  href={event.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-block rounded-md bg-blue-50 px-2.5 py-1 text-xs text-blue-700 hover:bg-blue-100"
+                >
+                  {event.name}
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
@@ -494,6 +521,8 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
   const [sfError, setSfError] = useState<string | null>(null);
   const [sortCol, setSortCol] = useState<SortCol | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>('asc');
+  const [allEventGuestsMap, setAllEventGuestsMap] = useState<Map<string, LumaGuest[]>>(new Map());
+  const [allEventsLoaded, setAllEventsLoaded] = useState(false);
 
   const handleSort = useCallback((col: SortCol) => {
     setSortCol(prev => {
@@ -611,6 +640,68 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
     setLoadingForEventIds(new Set());
   }, []);
 
+  // Background-load all events' guest lists so we can show all-time attended counts.
+  // Runs in batches of 20 parallel requests; results stream in progressively.
+  useEffect(() => {
+    if (events.length === 0 || allEventsLoaded) return;
+    let cancelled = false;
+
+    const load = async () => {
+      const BATCH = 20;
+      for (let i = 0; i < events.length; i += BATCH) {
+        if (cancelled) return;
+        const batch = events.slice(i, i + BATCH);
+        const results = await Promise.all(
+          batch.map(async event => {
+            try {
+              const res = await fetch(`/api/luma/guests?event_id=${encodeURIComponent(event.api_id)}`);
+              const data = await res.json();
+              return res.ok ? { eventId: event.api_id, guests: data.guests as LumaGuest[] } : null;
+            } catch {
+              return null;
+            }
+          })
+        );
+        if (cancelled) return;
+        setAllEventGuestsMap(prev => {
+          const next = new Map(prev);
+          for (const r of results) {
+            if (r) next.set(r.eventId, r.guests);
+          }
+          return next;
+        });
+      }
+      if (!cancelled) setAllEventsLoaded(true);
+    };
+
+    load();
+    return () => { cancelled = true; };
+  }, [events, allEventsLoaded]);
+
+  // All-time attended events per email, built from the background-loaded map.
+  const allTimeAttendedByEmail = useMemo(() => {
+    const map = new Map<string, Array<{ event: LumaEvent; guest: LumaGuest }>>();
+    for (const [eventId, guests] of allEventGuestsMap) {
+      const event = events.find(e => e.api_id === eventId);
+      if (!event) continue;
+      for (const guest of guests) {
+        if (!guest.checked_in_at) continue;
+        const email = (guest.email ?? guest.user_email ?? '').toLowerCase();
+        if (!email) continue;
+        const existing = map.get(email);
+        if (existing) {
+          existing.push({ event, guest });
+        } else {
+          map.set(email, [{ event, guest }]);
+        }
+      }
+    }
+    for (const [, attended] of map) {
+      attended.sort((a, b) => new Date(b.event.start_at).getTime() - new Date(a.event.start_at).getTime());
+    }
+    return map;
+  }, [allEventGuestsMap, events]);
+
   // Merge all selected events' guests, deduped by email
   const combinedAttendees = useMemo((): CombinedAttendee[] => {
     const byEmail = new Map<string, CombinedAttendee>();
@@ -712,11 +803,13 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
         const db = b.attendances[0]?.guest.registered_at ?? '';
         cmp = da.localeCompare(db);
       } else if (sortCol === 'events') {
-        cmp = a.attendances.length - b.attendances.length;
+        const ea = allTimeAttendedByEmail.get(email_a)?.length ?? 0;
+        const eb = allTimeAttendedByEmail.get(email_b)?.length ?? 0;
+        cmp = ea - eb;
       }
       return sortDir === 'asc' ? cmp : -cmp;
     });
-  }, [filteredAttendees, sortCol, sortDir, customerStatuses]);
+  }, [filteredAttendees, sortCol, sortDir, customerStatuses, allTimeAttendedByEmail]);
 
   const stats = useMemo(() => {
     let checkedIn = 0, approved = 0, pending = 0, waitlisted = 0, declined = 0, customers = 0;
@@ -741,8 +834,9 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
 
     const headers = [
       'Name', 'Email', 'Company', 'LinkedIn', 'Status', 'Customer',
-      isMulti ? '# Events' : 'Registered',
-      isMulti ? 'Events attended' : '',
+      'All events attended', 'All events list',
+      isMulti ? '# Selected events' : 'Registered',
+      isMulti ? 'Selected events' : '',
     ].filter(Boolean);
 
     const escape = (v: string) => `"${v.replace(/"/g, '""')}"`;
@@ -751,6 +845,7 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
       const email = guest.email ?? guest.user_email ?? '';
       const cs = customerStatuses.get(email.toLowerCase());
       const status = bestStatus(attendances);
+      const allTime = allTimeAttendedByEmail.get(email.toLowerCase()) ?? [];
       const row = [
         escape(guest.name ?? guest.user_name ?? ''),
         escape(email),
@@ -758,6 +853,8 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
         escape(getGuestLinkedin(guest) ?? ''),
         escape(STATUS_LABELS[status] ?? status),
         escape(cs === undefined ? '' : cs.isCustomer ? 'Yes' : 'No'),
+        String(allTime.length),
+        escape(allTime.map(a => a.event.name).join('; ')),
         isMulti
           ? String(attendances.length)
           : escape(formatDate(attendances[0]?.guest.registered_at ?? '')),
@@ -777,7 +874,7 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
     link.download = filename;
     link.click();
     URL.revokeObjectURL(url);
-  }, [sortedAttendees, selectedEventIds, events, customerStatuses]);
+  }, [sortedAttendees, selectedEventIds, events, customerStatuses, allTimeAttendedByEmail]);
 
   const isLoadingGuests = loadingForEventIds.size > 0;
   const multiEvent = selectedEventIds.length > 1;
@@ -917,9 +1014,9 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
                   <th className="px-5 py-3">LinkedIn</th>
                   <SortableHeader label="Status" col="status" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
                   <SortableHeader label="Customer" col="customer" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
-                  {multiEvent && <SortableHeader label="# Events" col="events" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} className="text-right" />}
+                  <SortableHeader label="All events" col="events" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} className="text-right" />
                   {multiEvent ? (
-                    <th className="px-5 py-3">Events attended</th>
+                    <th className="px-5 py-3">Selected events</th>
                   ) : (
                     <SortableHeader label="Registered" col="registered" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
                   )}
@@ -990,14 +1087,31 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
                           );
                         })()}
                       </td>
-                      {multiEvent && (
-                        <td className="px-5 py-3.5 text-right text-sm font-medium text-gray-700">
-                          {attendances.length}
-                          <span className="font-normal text-gray-400">
-                            /{selectedEventIds.length}
-                          </span>
-                        </td>
-                      )}
+                      <td className="px-5 py-3.5 text-right align-top">
+                        {(() => {
+                          const allTime = allTimeAttendedByEmail.get(email.toLowerCase()) ?? [];
+                          const hasData = allEventGuestsMap.size > 0;
+                          if (!hasData) return <span className="text-xs text-gray-300">…</span>;
+                          return (
+                            <div>
+                              <span className="text-sm font-medium text-gray-700">{allTime.length}</span>
+                              {!allEventsLoaded && (
+                                <span className="ml-1 text-xs text-gray-300">·</span>
+                              )}
+                              {allTime.length > 1 && (
+                                <div className="mt-1 space-y-0.5 text-left text-xs text-gray-400">
+                                  {allTime.slice(0, 3).map(a => (
+                                    <div key={a.event.api_id}>{a.event.name}</div>
+                                  ))}
+                                  {allTime.length > 3 && (
+                                    <div className="text-gray-300">+{allTime.length - 3} more</div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
+                      </td>
                       {multiEvent ? (
                         <td className="px-5 py-3.5 text-xs text-gray-500">
                           <div className="space-y-0.5">
@@ -1005,11 +1119,6 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
                               <div key={a.event.api_id}>{a.event.name}</div>
                             ))}
                           </div>
-                          {attendances.length < selectedEventIds.length && (
-                            <div className="mt-0.5 text-gray-300">
-                              {attendances.length}/{selectedEventIds.length} events
-                            </div>
-                          )}
                         </td>
                       ) : (
                         <td className="px-5 py-3.5 text-gray-500">
