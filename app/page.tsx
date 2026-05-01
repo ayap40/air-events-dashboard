@@ -252,7 +252,11 @@ function PersonDetail({
                 <span className="inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium bg-purple-100 text-purple-800">
                   Customer
                 </span>
-              ) : customerInfo === null ? null : (
+              ) : customerInfo === null ? (
+                <span className="inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium bg-gray-100 text-gray-400">
+                  No record
+                </span>
+              ) : (
                 <span className="inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium bg-gray-100 text-gray-500">
                   Not a customer
                 </span>
@@ -1077,7 +1081,7 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
                           <span className="text-xs text-gray-300">…</span>
                         ) : (() => {
                           const cs = customerStatuses.get(email.toLowerCase());
-                          if (!cs) return <span className="text-xs text-gray-300">—</span>;
+                          if (!cs) return <span className="text-xs text-gray-400">No record</span>;
                           return cs.isCustomer ? (
                             <span className="inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium bg-purple-100 text-purple-800">
                               Yes
