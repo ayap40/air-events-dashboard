@@ -71,14 +71,23 @@ function getGuestCompany(guest: LumaGuest): string | null {
 }
 
 function getGuestJobTitle(guest: LumaGuest): string | null {
-  const answer = guest.registration_answers?.find(
-    a =>
-      a.question_type === 'job_title' ||
-      a.label?.toLowerCase().includes('job title') ||
-      a.label?.toLowerCase() === 'title' ||
-      a.label?.toLowerCase() === 'role'
-  );
-  return answer?.answer_job_title ?? answer?.answer ?? null;
+  if (!guest.registration_answers) return null;
+
+  // Luma built-in job_title question type
+  const byType = guest.registration_answers.find(a => a.question_type === 'job_title');
+  if (byType) return byType.answer_job_title || byType.answer || null;
+
+  // Any answer that has the answer_job_title field populated (Luma may set this
+  // regardless of question_type when the label is recognised as a job title field)
+  const byField = guest.registration_answers.find(a => a.answer_job_title);
+  if (byField) return byField.answer_job_title || null;
+
+  // Fallback: label matching for custom text questions
+  const byLabel = guest.registration_answers.find(a => {
+    const l = a.label?.toLowerCase() ?? '';
+    return l.includes('job title') || l.includes('position') || l === 'title' || l === 'role';
+  });
+  return byLabel?.answer || null;
 }
 
 function getGuestLinkedin(guest: LumaGuest): string | null {
