@@ -1123,7 +1123,7 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
                     {isLoadingThis
                       ? 'Loading…'
                       : eventInfoMode === 'city'
-                        ? (event.geo_address_info?.city_state ?? event.geo_address_info?.city ?? event.geo_address_info?.description ?? formatShortDate(event.start_at))
+                        ? (event.geo_address_json?.city_state ?? event.geo_address_json?.city ?? event.geo_address_json?.description ?? formatShortDate(event.start_at))
                         : formatShortDate(event.start_at)}
                   </span>
                 </label>

@@ -9,7 +9,7 @@ export interface LumaEvent {
   end_at: string | null;
   url: string;
   cover_url: string | null;
-  geo_address_info?: {
+  geo_address_json?: {
     city_state?: string;
     city?: string;
     address?: string;
