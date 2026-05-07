@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { GuestSearchResult, LumaEvent, LumaGuest } from '@/services/lumaService';
 
@@ -13,7 +13,8 @@ interface CombinedAttendee {
 
 // -- Constants ---------------------------------------------------------------
 
-type SortCol = 'name' | 'email' | 'company' | 'status' | 'customer' | 'registered' | 'events';
+type SortCol = 'name' | 'email' | 'job_title' | 'company' | 'status' | 'customer' | 'registered' | 'events';
+type VisibleColKey = 'job_title' | 'company' | 'linkedin' | 'customer' | 'events';
 type SortDir = 'asc' | 'desc';
 
 const STATUS_SORT_ORDER: Record<string, number> = {
@@ -67,6 +68,17 @@ function normalizeLinkedinUrl(raw: string): string {
 function getGuestCompany(guest: LumaGuest): string | null {
   const answer = guest.registration_answers?.find(a => a.question_type === 'company');
   return answer?.answer_company ?? answer?.answer ?? null;
+}
+
+function getGuestJobTitle(guest: LumaGuest): string | null {
+  const answer = guest.registration_answers?.find(
+    a =>
+      a.question_type === 'job_title' ||
+      a.label?.toLowerCase().includes('job title') ||
+      a.label?.toLowerCase() === 'title' ||
+      a.label?.toLowerCase() === 'role'
+  );
+  return answer?.answer_job_title ?? answer?.answer ?? null;
 }
 
 function getGuestLinkedin(guest: LumaGuest): string | null {
@@ -167,10 +179,14 @@ function StatPill({
   label,
   value,
   color,
+  onClick,
+  active,
 }: {
   label: string;
   value: number;
   color: 'gray' | 'green' | 'blue' | 'yellow' | 'red' | 'purple';
+  onClick?: () => void;
+  active?: boolean;
 }) {
   const colors = {
     gray: 'bg-gray-100 text-gray-600',
@@ -181,9 +197,15 @@ function StatPill({
     purple: 'bg-purple-100 text-purple-700',
   };
   return (
-    <div className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium ${colors[color]}`}>
+    <div
+      onClick={onClick}
+      className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition-all ${colors[color]} ${
+        onClick ? 'cursor-pointer hover:opacity-75 select-none' : ''
+      } ${active ? 'ring-2 ring-offset-1 ring-gray-500' : ''}`}
+    >
       <span className="text-sm font-semibold">{value}</span>
       {label}
+      {active && <span className="ml-0.5 opacity-60">×</span>}
     </div>
   );
 }
@@ -506,6 +528,67 @@ function SearchTab({ initialQuery = '' }: { initialQuery?: string }) {
   );
 }
 
+// -- Fields selector ---------------------------------------------------------
+
+const OPTIONAL_COLS: Array<{ key: VisibleColKey; label: string }> = [
+  { key: 'job_title', label: 'Job Title' },
+  { key: 'company', label: 'Company' },
+  { key: 'linkedin', label: 'LinkedIn' },
+  { key: 'customer', label: 'Customer' },
+  { key: 'events', label: 'All Events' },
+];
+
+const DEFAULT_VISIBLE_COLS = new Set<VisibleColKey>(['job_title', 'company', 'linkedin', 'customer', 'events']);
+
+function FieldsSelector({
+  visibleCols,
+  onToggle,
+}: {
+  visibleCols: Set<VisibleColKey>;
+  onToggle: (col: VisibleColKey) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleOutside = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handleOutside);
+    return () => document.removeEventListener('mousedown', handleOutside);
+  }, [open]);
+
+  const handleToggle = useCallback(() => setOpen(o => !o), []);
+
+  return (
+    <div ref={ref} className="relative shrink-0">
+      <button
+        type="button"
+        onClick={handleToggle}
+        className="rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-600 shadow-sm transition hover:bg-gray-50"
+      >
+        Fields
+      </button>
+      {open && (
+        <div className="absolute right-0 z-10 mt-1 w-44 rounded-lg border border-gray-200 bg-white py-1.5 shadow-lg">
+          {OPTIONAL_COLS.map(({ key, label }) => (
+            <label key={key} className="flex cursor-pointer items-center gap-2.5 px-3 py-1.5 hover:bg-gray-50">
+              <input
+                type="checkbox"
+                checked={visibleCols.has(key)}
+                onChange={() => onToggle(key)}
+                className="h-3.5 w-3.5 rounded border-gray-300 text-gray-900 focus:ring-gray-500"
+              />
+              <span className="text-sm text-gray-700">{label}</span>
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // -- Event attendees tab -----------------------------------------------------
 
 function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => void }) {
@@ -527,6 +610,41 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
   const [sortDir, setSortDir] = useState<SortDir>('asc');
   const [allEventGuestsMap, setAllEventGuestsMap] = useState<Map<string, LumaGuest[]>>(new Map());
   const [allEventsLoaded, setAllEventsLoaded] = useState(false);
+  const [visibleCols, setVisibleCols] = useState<Set<VisibleColKey>>(() => {
+    if (typeof window === 'undefined') return new Set(DEFAULT_VISIBLE_COLS);
+    try {
+      const saved = localStorage.getItem('air-events-visible-cols');
+      if (saved) {
+        const parsed = JSON.parse(saved) as string[];
+        const valid = parsed.filter((k): k is VisibleColKey => OPTIONAL_COLS.some(c => c.key === k));
+        if (valid.length > 0) return new Set(valid);
+      }
+    } catch {}
+    return new Set(DEFAULT_VISIBLE_COLS);
+  });
+  const [statusFilter, setStatusFilter] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const handleToggleCol = useCallback((col: VisibleColKey) => {
+    setVisibleCols(prev => {
+      const next = new Set(prev);
+      if (next.has(col)) next.delete(col);
+      else next.add(col);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('air-events-visible-cols', JSON.stringify([...visibleCols]));
+    } catch {}
+  }, [visibleCols]);
+
+  const handleStatusFilter = useCallback((status: string) => {
+    setStatusFilter(prev => (prev === status ? null : status));
+  }, []);
+
+  const handleClearStatusFilter = useCallback(() => setStatusFilter(null), []);
 
   const handleSort = useCallback((col: SortCol) => {
     setSortCol(prev => {
@@ -769,15 +887,20 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
   }, [combinedAttendees]);
 
   const filteredAttendees = useMemo(() => {
-    if (!attendeeFilter.trim()) return combinedAttendees;
+    let list = combinedAttendees;
+    if (statusFilter) {
+      list = list.filter(({ attendances }) => bestStatus(attendances) === statusFilter);
+    }
+    if (!attendeeFilter.trim()) return list;
     const q = attendeeFilter.toLowerCase();
-    return combinedAttendees.filter(({ guest }) => {
+    return list.filter(({ guest }) => {
       const name = (guest.name ?? guest.user_name ?? '').toLowerCase();
       const email = (guest.email ?? guest.user_email ?? '').toLowerCase();
       const company = (getGuestCompany(guest) ?? '').toLowerCase();
-      return name.includes(q) || email.includes(q) || company.includes(q);
+      const jobTitle = (getGuestJobTitle(guest) ?? '').toLowerCase();
+      return name.includes(q) || email.includes(q) || company.includes(q) || jobTitle.includes(q);
     });
-  }, [combinedAttendees, attendeeFilter]);
+  }, [combinedAttendees, attendeeFilter, statusFilter]);
 
   const sortedAttendees = useMemo(() => {
     if (!sortCol) return filteredAttendees;
@@ -791,6 +914,8 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
         cmp = (ag.name ?? ag.user_name ?? '').localeCompare(bg.name ?? bg.user_name ?? '');
       } else if (sortCol === 'email') {
         cmp = email_a.localeCompare(email_b);
+      } else if (sortCol === 'job_title') {
+        cmp = (getGuestJobTitle(ag) ?? '').localeCompare(getGuestJobTitle(bg) ?? '');
       } else if (sortCol === 'company') {
         cmp = (getGuestCompany(ag) ?? '').localeCompare(getGuestCompany(bg) ?? '');
       } else if (sortCol === 'status') {
@@ -836,14 +961,21 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
     const selectedEvents = selectedEventIds.map(id => events.find(e => e.api_id === id)).filter(Boolean);
     const isMulti = selectedEventIds.length > 1;
 
-    const headers = [
-      'Name', 'Email', 'Company', 'LinkedIn', 'Status', 'Customer',
-      'All events attended', 'All events list',
-      isMulti ? '# Selected events' : 'Registered',
-      isMulti ? 'Selected events' : '',
-    ].filter(Boolean);
-
     const escape = (v: string) => `"${v.replace(/"/g, '""')}"`;
+
+    const headers = [
+      'Name',
+      'Email',
+      visibleCols.has('job_title') ? 'Job Title' : null,
+      visibleCols.has('company') ? 'Company' : null,
+      visibleCols.has('linkedin') ? 'LinkedIn' : null,
+      'Status',
+      visibleCols.has('customer') ? 'Customer' : null,
+      visibleCols.has('events') ? 'All events attended' : null,
+      visibleCols.has('events') ? 'All events list' : null,
+      isMulti ? '# Selected events' : 'Registered',
+      isMulti ? 'Selected events' : null,
+    ].filter((h): h is string => h !== null);
 
     const rows = sortedAttendees.map(({ guest, attendances }) => {
       const email = guest.email ?? guest.user_email ?? '';
@@ -853,17 +985,17 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
       const row = [
         escape(guest.name ?? guest.user_name ?? ''),
         escape(email),
-        escape(getGuestCompany(guest) ?? ''),
-        escape(getGuestLinkedin(guest) ?? ''),
+        ...(visibleCols.has('job_title') ? [escape(getGuestJobTitle(guest) ?? '')] : []),
+        ...(visibleCols.has('company') ? [escape(getGuestCompany(guest) ?? '')] : []),
+        ...(visibleCols.has('linkedin') ? [escape(getGuestLinkedin(guest) ?? '')] : []),
         escape(STATUS_LABELS[status] ?? status),
-        escape(cs === undefined ? '' : cs.isCustomer ? 'Yes' : 'No'),
-        String(allTime.length),
-        escape(allTime.map(a => a.event.name).join('; ')),
+        ...(visibleCols.has('customer') ? [escape(cs === undefined ? '' : cs.isCustomer ? 'Yes' : 'No')] : []),
+        ...(visibleCols.has('events') ? [String(allTime.length), escape(allTime.map(a => a.event.name).join('; '))] : []),
         isMulti
           ? String(attendances.length)
           : escape(formatDate(attendances[0]?.guest.registered_at ?? '')),
+        ...(isMulti ? [escape(attendances.map(a => a.event.name).join('; '))] : []),
       ];
-      if (isMulti) row.push(escape(attendances.map(a => a.event.name).join('; ')));
       return row.join(',');
     });
 
@@ -878,7 +1010,18 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
     link.download = filename;
     link.click();
     URL.revokeObjectURL(url);
-  }, [sortedAttendees, selectedEventIds, events, customerStatuses, allTimeAttendedByEmail]);
+  }, [sortedAttendees, selectedEventIds, events, customerStatuses, allTimeAttendedByEmail, visibleCols]);
+
+  const handleCopyEmails = useCallback(() => {
+    const emails = sortedAttendees
+      .map(({ guest }) => guest.email ?? guest.user_email ?? '')
+      .filter(Boolean);
+    navigator.clipboard.writeText(emails.join('\n'));
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }, [sortedAttendees]);
+
+  const handleClearFilter = useCallback(() => setAttendeeFilter(''), []);
 
   const isLoadingGuests = loadingForEventIds.size > 0;
   const multiEvent = selectedEventIds.length > 1;
@@ -973,32 +1116,83 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
 
       {!isLoadingGuests && combinedAttendees.length > 0 && (
         <>
-          {/* Stats bar */}
+          {/* Stats bar — click a pill to filter by that status */}
           <div className="flex flex-wrap gap-2">
-            <StatPill label="Total" value={stats.total} color="gray" />
-            {stats.approved > 0 && <StatPill label="Approved" value={stats.approved} color="green" />}
-            {stats.checkedIn > 0 && <StatPill label="Checked in" value={stats.checkedIn} color="blue" />}
-            {stats.pending > 0 && <StatPill label="Pending" value={stats.pending} color="yellow" />}
-            {stats.waitlisted > 0 && <StatPill label="Waitlisted" value={stats.waitlisted} color="gray" />}
-            {stats.declined > 0 && <StatPill label="Declined" value={stats.declined} color="red" />}
+            <StatPill
+              label="Total"
+              value={stats.total}
+              color="gray"
+              onClick={statusFilter ? handleClearStatusFilter : undefined}
+              active={false}
+            />
+            {stats.approved > 0 && (
+              <StatPill label="Approved" value={stats.approved} color="green"
+                onClick={() => handleStatusFilter('approved')}
+                active={statusFilter === 'approved'}
+              />
+            )}
+            {stats.checkedIn > 0 && (
+              <StatPill label="Checked in" value={stats.checkedIn} color="blue"
+                onClick={() => handleStatusFilter('checked_in')}
+                active={statusFilter === 'checked_in'}
+              />
+            )}
+            {stats.pending > 0 && (
+              <StatPill label="Pending" value={stats.pending} color="yellow"
+                onClick={() => handleStatusFilter('pending_approval')}
+                active={statusFilter === 'pending_approval'}
+              />
+            )}
+            {stats.waitlisted > 0 && (
+              <StatPill label="Waitlisted" value={stats.waitlisted} color="gray"
+                onClick={() => handleStatusFilter('waitlisted')}
+                active={statusFilter === 'waitlisted'}
+              />
+            )}
+            {stats.declined > 0 && (
+              <StatPill label="Declined" value={stats.declined} color="red"
+                onClick={() => handleStatusFilter('declined')}
+                active={statusFilter === 'declined'}
+              />
+            )}
             {!loadingCustomer && stats.customers > 0 && (
               <StatPill label="Customers" value={stats.customers} color="purple" />
             )}
           </div>
 
           <div className="flex items-center gap-3">
-            <input
-              type="text"
-              value={attendeeFilter}
-              onChange={handleAttendeeFilterChange}
-              placeholder="Filter by name, email, or company…"
-              className="flex-1 rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm text-gray-900 placeholder-gray-400 shadow-sm outline-none focus:border-gray-500 focus:ring-2 focus:ring-gray-200"
-            />
+            <div className="relative flex-1">
+              <input
+                type="text"
+                value={attendeeFilter}
+                onChange={handleAttendeeFilterChange}
+                placeholder="Filter by name, email, or company…"
+                className="w-full rounded-lg border border-gray-300 bg-white px-4 py-2.5 pr-9 text-sm text-gray-900 placeholder-gray-400 shadow-sm outline-none focus:border-gray-500 focus:ring-2 focus:ring-gray-200"
+              />
+              {attendeeFilter && (
+                <button
+                  type="button"
+                  onClick={handleClearFilter}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                  aria-label="Clear filter"
+                >
+                  ×
+                </button>
+              )}
+            </div>
             {sortedAttendees.length !== combinedAttendees.length && (
               <span className="shrink-0 text-sm text-gray-400">
                 {sortedAttendees.length} of {combinedAttendees.length}
               </span>
             )}
+            <FieldsSelector visibleCols={visibleCols} onToggle={handleToggleCol} />
+            <button
+              type="button"
+              onClick={handleCopyEmails}
+              className="shrink-0 rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-600 shadow-sm transition hover:bg-gray-50"
+            >
+              {copied ? 'Copied!' : 'Copy emails'}
+            </button>
             <button
               type="button"
               onClick={handleDownload}
@@ -1014,11 +1208,20 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
                 <tr className="border-b border-gray-100 bg-gray-50 text-left text-xs font-medium uppercase tracking-wide text-gray-400">
                   <SortableHeader label="Name" col="name" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
                   <SortableHeader label="Email" col="email" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
-                  <SortableHeader label="Company" col="company" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
-                  <th className="px-5 py-3">LinkedIn</th>
+                  {visibleCols.has('job_title') && (
+                    <SortableHeader label="Job Title" col="job_title" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
+                  )}
+                  {visibleCols.has('company') && (
+                    <SortableHeader label="Company" col="company" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
+                  )}
+                  {visibleCols.has('linkedin') && <th className="px-5 py-3">LinkedIn</th>}
                   <SortableHeader label="Status" col="status" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
-                  <SortableHeader label="Customer" col="customer" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
-                  <SortableHeader label="All events" col="events" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} className="text-right" />
+                  {visibleCols.has('customer') && (
+                    <SortableHeader label="Customer" col="customer" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
+                  )}
+                  {visibleCols.has('events') && (
+                    <SortableHeader label="All events" col="events" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} className="text-right" />
+                  )}
                   {multiEvent ? (
                     <th className="px-5 py-3">Selected events</th>
                   ) : (
@@ -1030,6 +1233,7 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
                 {sortedAttendees.map(({ guest, attendances }) => {
                   const linkedin = getGuestLinkedin(guest);
                   const company = getGuestCompany(guest);
+                  const jobTitle = getGuestJobTitle(guest);
                   const status = bestStatus(attendances);
                   const email = guest.email ?? guest.user_email ?? '';
 
@@ -1057,65 +1261,76 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
                           '—'
                         )}
                       </td>
-                      <td className="px-5 py-3.5 text-gray-500">{company ?? '—'}</td>
-                      <td className="px-5 py-3.5">
-                        {linkedin ? (
-                          <a
-                            href={linkedin}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1.5 text-blue-600 hover:text-blue-800"
-                          >
-                            <LinkedInIcon className="h-3.5 w-3.5" />
-                            <span className="text-xs">Profile</span>
-                          </a>
-                        ) : (
-                          '—'
-                        )}
-                      </td>
+                      {visibleCols.has('job_title') && (
+                        <td className="px-5 py-3.5 text-gray-500">{jobTitle ?? '—'}</td>
+                      )}
+                      {visibleCols.has('company') && (
+                        <td className="px-5 py-3.5 text-gray-500">{company ?? '—'}</td>
+                      )}
+                      {visibleCols.has('linkedin') && (
+                        <td className="px-5 py-3.5">
+                          {linkedin ? (
+                            <a
+                              href={linkedin}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1.5 text-blue-600 hover:text-blue-800"
+                            >
+                              <LinkedInIcon className="h-3.5 w-3.5" />
+                              <span className="text-xs">Profile</span>
+                            </a>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
+                      )}
                       <td className="px-5 py-3.5">
                         <StatusBadge status={status} />
                       </td>
-                      <td className="px-5 py-3.5">
-                        {loadingCustomer ? (
-                          <span className="text-xs text-gray-300">…</span>
-                        ) : (() => {
-                          const cs = customerStatuses.get(email.toLowerCase());
-                          if (!cs) return <span className="text-xs text-gray-400">No record</span>;
-                          return cs.isCustomer ? (
-                            <span className="inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium bg-purple-100 text-purple-800">
-                              Yes
-                            </span>
-                          ) : (
-                            <span className="text-xs text-gray-400">No</span>
-                          );
-                        })()}
-                      </td>
-                      <td className="px-5 py-3.5 text-right align-top">
-                        {(() => {
-                          const allTime = allTimeAttendedByEmail.get(email.toLowerCase()) ?? [];
-                          const hasData = allEventGuestsMap.size > 0;
-                          if (!hasData) return <span className="text-xs text-gray-300">…</span>;
-                          return (
-                            <div>
-                              <span className="text-sm font-medium text-gray-700">{allTime.length}</span>
-                              {!allEventsLoaded && (
-                                <span className="ml-1 text-xs text-gray-300">·</span>
-                              )}
-                              {allTime.length > 1 && (
-                                <div className="mt-1 space-y-0.5 text-left text-xs text-gray-400">
-                                  {allTime.slice(0, 3).map(a => (
-                                    <div key={a.event.api_id}>{a.event.name}</div>
-                                  ))}
-                                  {allTime.length > 3 && (
-                                    <div className="text-gray-300">+{allTime.length - 3} more</div>
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })()}
-                      </td>
+                      {visibleCols.has('customer') && (
+                        <td className="px-5 py-3.5">
+                          {loadingCustomer ? (
+                            <span className="text-xs text-gray-300">…</span>
+                          ) : (() => {
+                            const cs = customerStatuses.get(email.toLowerCase());
+                            if (!cs) return <span className="text-xs text-gray-400">No record</span>;
+                            return cs.isCustomer ? (
+                              <span className="inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium bg-purple-100 text-purple-800">
+                                Yes
+                              </span>
+                            ) : (
+                              <span className="text-xs text-gray-400">No</span>
+                            );
+                          })()}
+                        </td>
+                      )}
+                      {visibleCols.has('events') && (
+                        <td className="px-5 py-3.5 text-right align-top">
+                          {(() => {
+                            const allTime = allTimeAttendedByEmail.get(email.toLowerCase()) ?? [];
+                            const hasData = allEventGuestsMap.size > 0;
+                            if (!hasData) return <span className="text-xs text-gray-300">…</span>;
+                            return (
+                              <div>
+                                <span className="text-sm font-medium text-gray-700">{allTime.length}</span>
+                                {!allEventsLoaded && (
+                                  <span className="ml-1 text-xs text-gray-300">·</span>
+                                )}
+                                {allTime.length > 1 && (
+                                  <div className="mt-1 space-y-0.5 text-left text-xs text-gray-400">
+                                    {allTime.slice(0, 3).map(a => (
+                                      <div key={a.event.api_id}>{a.event.name}</div>
+                                    ))}
+                                    {allTime.length > 3 && (
+                                      <div className="text-gray-300">+{allTime.length - 3} more</div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
+                        </td>
+                      )}
                       {multiEvent ? (
                         <td className="px-5 py-3.5 text-xs text-gray-500">
                           <div className="space-y-0.5">
