@@ -9,6 +9,13 @@ export interface LumaEvent {
   end_at: string | null;
   url: string;
   cover_url: string | null;
+  geo_address_info?: {
+    city_state?: string;
+    city?: string;
+    address?: string;
+    description?: string;
+    full_address?: string;
+  } | null;
 }
 
 interface CalendarListResponse {

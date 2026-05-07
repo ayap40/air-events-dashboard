@@ -619,6 +619,7 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
   const [sortDir, setSortDir] = useState<SortDir>('asc');
   const [allEventGuestsMap, setAllEventGuestsMap] = useState<Map<string, LumaGuest[]>>(new Map());
   const [allEventsLoaded, setAllEventsLoaded] = useState(false);
+  const [eventInfoMode, setEventInfoMode] = useState<'date' | 'city'>('date');
   const [visibleCols, setVisibleCols] = useState<Set<VisibleColKey>>(() => {
     if (typeof window === 'undefined') return new Set(DEFAULT_VISIBLE_COLS);
     try {
@@ -654,6 +655,10 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
   }, []);
 
   const handleClearStatusFilter = useCallback(() => setStatusFilter(null), []);
+
+  const handleToggleEventInfoMode = useCallback(() => {
+    setEventInfoMode(prev => (prev === 'date' ? 'city' : 'date'));
+  }, []);
 
   const handleSort = useCallback((col: SortCol) => {
     setSortCol(prev => {
@@ -1050,6 +1055,22 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
             placeholder="Filter events…"
             className="flex-1 bg-transparent text-sm text-gray-900 placeholder-gray-400 outline-none"
           />
+          <div className="flex shrink-0 items-center rounded-md border border-gray-200 text-xs">
+            <button
+              type="button"
+              onClick={eventInfoMode === 'city' ? handleToggleEventInfoMode : undefined}
+              className={`px-2 py-1 transition-colors ${eventInfoMode === 'date' ? 'bg-gray-100 font-medium text-gray-700' : 'text-gray-400 hover:text-gray-600'}`}
+            >
+              Date
+            </button>
+            <button
+              type="button"
+              onClick={eventInfoMode === 'date' ? handleToggleEventInfoMode : undefined}
+              className={`px-2 py-1 transition-colors ${eventInfoMode === 'city' ? 'bg-gray-100 font-medium text-gray-700' : 'text-gray-400 hover:text-gray-600'}`}
+            >
+              City
+            </button>
+          </div>
           <button
             type="button"
             onClick={handleSelectAll}
@@ -1099,7 +1120,11 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
                     ↗
                   </a>
                   <span className="shrink-0 text-xs text-gray-400">
-                    {isLoadingThis ? 'Loading…' : formatShortDate(event.start_at)}
+                    {isLoadingThis
+                      ? 'Loading…'
+                      : eventInfoMode === 'city'
+                        ? (event.geo_address_info?.city_state ?? event.geo_address_info?.city ?? event.geo_address_info?.description ?? formatShortDate(event.start_at))
+                        : formatShortDate(event.start_at)}
                   </span>
                 </label>
               );
