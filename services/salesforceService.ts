@@ -267,3 +267,57 @@ export async function getCustomerStatuses(
 
   return result;
 }
+
+// -- Campaign audit -----------------------------------------------------------
+
+export interface CampaignMemberRecord {
+  email: string;
+  status: string;
+}
+
+export interface SalesforceCampaign {
+  id: string;
+  name: string;
+}
+
+export async function getCampaignMembers(campaignId: string): Promise<CampaignMemberRecord[]> {
+  const token = await getToken();
+  const results: CampaignMemberRecord[] = [];
+  const soql = `SELECT Lead.Email, Contact.Email, Status FROM CampaignMember WHERE CampaignId = '${campaignId.replace(/'/g, "\\'")}'`;
+  let url: string = `${token.instance_url}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
+
+  while (url) {
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${token.access_token}` } });
+    if (!res.ok) throw new Error(`Campaign members fetch failed: ${res.status}`);
+    const data = await res.json();
+
+    for (const record of (data.records ?? []) as Record<string, unknown>[]) {
+      const lead = record.Lead as Record<string, string> | null;
+      const contact = record.Contact as Record<string, string> | null;
+      const email = ((lead?.Email ?? contact?.Email) ?? '').toLowerCase().trim();
+      if (email) results.push({ email, status: record.Status as string });
+    }
+
+    url = data.nextRecordsUrl ? `${token.instance_url}${data.nextRecordsUrl as string}` : '';
+  }
+
+  return results;
+}
+
+export async function lookupCampaignByName(name: string): Promise<SalesforceCampaign[]> {
+  const token = await getToken();
+  const escaped = name.replace(/'/g, "\\'");
+  const soql = `SELECT Id, Name FROM Campaign WHERE Name LIKE '%${escaped}%' ORDER BY CreatedDate DESC LIMIT 5`;
+
+  const res = await fetch(
+    `${token.instance_url}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`,
+    { headers: { Authorization: `Bearer ${token.access_token}` } }
+  );
+
+  if (!res.ok) throw new Error(`Campaign lookup failed: ${res.status}`);
+  const data = await res.json();
+  return (data.records ?? []).map((r: Record<string, unknown>) => ({
+    id: r.Id as string,
+    name: r.Name as string,
+  }));
+}

@@ -11,6 +11,26 @@ interface CombinedAttendee {
   attendances: Array<{ event: LumaEvent; guest: LumaGuest }>;
 }
 
+interface CampaignMember {
+  email: string;
+  status: string;
+}
+
+interface SfCampaign {
+  id: string;
+  name: string;
+}
+
+type AuditCategory = 'ok' | 'needs_attend' | 'status_mismatch' | 'luma_only' | 'sfdc_only';
+
+interface AuditRow {
+  email: string;
+  name: string | null;
+  lumaStatus: 'checked_in' | 'registered' | 'declined' | 'not_in_luma';
+  sfdcStatus: string | 'not_in_sfdc';
+  category: AuditCategory;
+}
+
 // -- Constants ---------------------------------------------------------------
 
 type SortCol = 'name' | 'email' | 'job_title' | 'company' | 'status' | 'customer' | 'registered' | 'events';
@@ -1390,9 +1410,588 @@ function AttendeesTab({ onSearchEmail }: { onSearchEmail?: (email: string) => vo
   );
 }
 
+// -- Audit helpers -----------------------------------------------------------
+
+function buildAuditRows(lumaGuests: LumaGuest[], sfMembers: CampaignMember[]): AuditRow[] {
+  const sfByEmail = new Map(sfMembers.map(m => [m.email.toLowerCase(), m]));
+  const lumaByEmail = new Map<string, LumaGuest>();
+  for (const g of lumaGuests) {
+    const email = (g.email ?? g.user_email ?? '').toLowerCase().trim();
+    if (email) lumaByEmail.set(email, g);
+  }
+
+  const rows: AuditRow[] = [];
+
+  for (const [email, guest] of lumaByEmail) {
+    const lumaStatus = guest.checked_in_at
+      ? 'checked_in'
+      : guest.approval_status === 'declined'
+        ? 'declined'
+        : 'registered';
+    const sf = sfByEmail.get(email);
+
+    if (!sf) {
+      rows.push({
+        email,
+        name: guest.name ?? guest.user_name ?? null,
+        lumaStatus,
+        sfdcStatus: 'not_in_sfdc',
+        category: 'luma_only',
+      });
+    } else {
+      let category: AuditCategory = 'ok';
+      if (lumaStatus === 'checked_in' && sf.status !== 'Attended') category = 'needs_attend';
+      else if (lumaStatus !== 'checked_in' && sf.status === 'Attended') category = 'status_mismatch';
+      rows.push({
+        email,
+        name: guest.name ?? guest.user_name ?? null,
+        lumaStatus,
+        sfdcStatus: sf.status,
+        category,
+      });
+    }
+  }
+
+  for (const [email, sf] of sfByEmail) {
+    if (!lumaByEmail.has(email)) {
+      rows.push({
+        email,
+        name: null,
+        lumaStatus: 'not_in_luma',
+        sfdcStatus: sf.status,
+        category: 'sfdc_only',
+      });
+    }
+  }
+
+  return rows;
+}
+
+// -- Audit tab ---------------------------------------------------------------
+
+type AuditFilter = 'all' | 'needs_attend' | 'luma_only' | 'sfdc_only' | 'ok';
+
+const AUDIT_LUMA_STATUS_LABELS: Record<string, string> = {
+  checked_in: 'Checked In',
+  registered: 'Registered',
+  declined: 'Declined',
+  not_in_luma: '—',
+};
+
+const AUDIT_LUMA_STATUS_COLORS: Record<string, string> = {
+  checked_in: 'bg-blue-100 text-blue-800',
+  registered: 'bg-green-100 text-green-800',
+  declined: 'bg-red-100 text-red-800',
+  not_in_luma: 'bg-gray-100 text-gray-400',
+};
+
+const AUDIT_SFDC_STATUS_COLORS: Record<string, string> = {
+  Attended: 'bg-green-100 text-green-800',
+  Registered: 'bg-gray-100 text-gray-600',
+  not_in_sfdc: 'bg-red-100 text-red-700',
+};
+
+const AUDIT_ROW_COLORS: Record<AuditCategory, string> = {
+  needs_attend: 'bg-yellow-50',
+  luma_only: 'bg-red-50',
+  sfdc_only: 'bg-gray-50',
+  status_mismatch: 'bg-orange-50',
+  ok: '',
+};
+
+function AuditLumaStatusBadge({ status }: { status: string }) {
+  const colorClass = AUDIT_LUMA_STATUS_COLORS[status] ?? 'bg-gray-100 text-gray-600';
+  const label = AUDIT_LUMA_STATUS_LABELS[status] ?? status;
+  if (status === 'not_in_luma') {
+    return <span className="text-gray-300">—</span>;
+  }
+  return (
+    <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${colorClass}`}>
+      {label}
+    </span>
+  );
+}
+
+function AuditSfdcStatusBadge({ status }: { status: string }) {
+  if (status === 'not_in_sfdc') {
+    return <span className="text-xs font-medium text-red-600">—</span>;
+  }
+  const colorClass = AUDIT_SFDC_STATUS_COLORS[status] ?? 'bg-gray-100 text-gray-600';
+  return (
+    <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${colorClass}`}>
+      {status}
+    </span>
+  );
+}
+
+function AuditTab() {
+  const [events, setEvents] = useState<LumaEvent[]>([]);
+  const [loadingEvents, setLoadingEvents] = useState(true);
+  const [eventsError, setEventsError] = useState<string | null>(null);
+  const [eventSearch, setEventSearch] = useState('');
+  const [selectedEvent, setSelectedEvent] = useState<LumaEvent | null>(null);
+
+  // Luma guests for the selected event
+  const [lumaGuests, setLumaGuests] = useState<LumaGuest[]>([]);
+  const [loadingGuests, setLoadingGuests] = useState(false);
+  const [guestsError, setGuestsError] = useState<string | null>(null);
+
+  // Campaign lookup/selection
+  const [campaignCandidates, setCampaignCandidates] = useState<SfCampaign[]>([]);
+  const [selectedCampaign, setSelectedCampaign] = useState<SfCampaign | null>(null);
+  const [campaignLookupError, setCampaignLookupError] = useState<string | null>(null);
+  const [showManualInput, setShowManualInput] = useState(false);
+  const [manualCampaignId, setManualCampaignId] = useState('');
+  const [manualCampaignName, setManualCampaignName] = useState('');
+
+  // Campaign members
+  const [sfMembers, setSfMembers] = useState<CampaignMember[]>([]);
+  const [loadingMembers, setLoadingMembers] = useState(false);
+  const [membersError, setMembersError] = useState<string | null>(null);
+
+  // Audit results + filter
+  const [auditFilter, setAuditFilter] = useState<AuditFilter>('all');
+
+  const handleEventSearchChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setEventSearch(e.target.value);
+  }, []);
+
+  const handleManualCampaignIdChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setManualCampaignId(e.target.value);
+  }, []);
+
+  const handleManualCampaignNameChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setManualCampaignName(e.target.value);
+  }, []);
+
+  useEffect(() => {
+    fetch('/api/luma/events')
+      .then(r => r.json())
+      .then(data => {
+        if (data.events) setEvents(data.events);
+        else setEventsError(data.error ?? 'Failed to load events');
+      })
+      .catch(() => setEventsError('Failed to load events'))
+      .finally(() => setLoadingEvents(false));
+  }, []);
+
+  const handleSelectEvent = useCallback(async (event: LumaEvent) => {
+    setSelectedEvent(event);
+    setLumaGuests([]);
+    setSfMembers([]);
+    setSelectedCampaign(null);
+    setCampaignCandidates([]);
+    setCampaignLookupError(null);
+    setShowManualInput(false);
+    setManualCampaignId('');
+    setManualCampaignName('');
+    setGuestsError(null);
+    setMembersError(null);
+    setAuditFilter('all');
+
+    // Fetch Luma guests
+    setLoadingGuests(true);
+    try {
+      const res = await fetch(`/api/luma/guests?event_id=${encodeURIComponent(event.api_id)}`);
+      const data = await res.json();
+      if (res.ok) {
+        setLumaGuests(data.guests ?? []);
+      } else {
+        setGuestsError(data.error ?? 'Failed to load Luma guests');
+      }
+    } catch {
+      setGuestsError('Failed to load Luma guests');
+    } finally {
+      setLoadingGuests(false);
+    }
+
+    // Auto-lookup SFDC campaign by event name
+    try {
+      const res = await fetch(`/api/salesforce/campaign-lookup?name=${encodeURIComponent(event.name)}`);
+      const data = await res.json();
+      if (!res.ok) {
+        setCampaignLookupError(data.error ?? 'Campaign lookup failed');
+        return;
+      }
+      const found: SfCampaign[] = data.campaigns ?? [];
+      if (found.length === 1) {
+        setSelectedCampaign(found[0]);
+        setCampaignCandidates([]);
+      } else if (found.length > 1) {
+        setCampaignCandidates(found);
+      } else {
+        // No match — show manual input
+        setShowManualInput(true);
+      }
+    } catch {
+      setCampaignLookupError('Campaign lookup failed');
+    }
+  }, []);
+
+  // Fetch campaign members whenever selectedCampaign changes
+  useEffect(() => {
+    if (!selectedCampaign) return;
+
+    setLoadingMembers(true);
+    setMembersError(null);
+    setSfMembers([]);
+
+    fetch(`/api/salesforce/campaign-members?campaign_id=${encodeURIComponent(selectedCampaign.id)}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) throw new Error(data.error);
+        setSfMembers(data.members ?? []);
+      })
+      .catch((err: unknown) => {
+        setMembersError(err instanceof Error ? err.message : 'Failed to load campaign members');
+      })
+      .finally(() => setLoadingMembers(false));
+  }, [selectedCampaign]);
+
+  const handleSelectCampaignCandidate = useCallback((campaign: SfCampaign) => {
+    setSelectedCampaign(campaign);
+    setCampaignCandidates([]);
+    setShowManualInput(false);
+  }, []);
+
+  const handleShowManualInput = useCallback(() => {
+    setShowManualInput(true);
+    setCampaignCandidates([]);
+  }, []);
+
+  const handleConfirmManualCampaign = useCallback(() => {
+    if (!manualCampaignId.trim()) return;
+    setSelectedCampaign({
+      id: manualCampaignId.trim(),
+      name: manualCampaignName.trim() || manualCampaignId.trim(),
+    });
+    setShowManualInput(false);
+  }, [manualCampaignId, manualCampaignName]);
+
+  const handleEditCampaign = useCallback(() => {
+    setSelectedCampaign(null);
+    setSfMembers([]);
+    setShowManualInput(true);
+    setManualCampaignId('');
+    setManualCampaignName('');
+  }, []);
+
+  const filteredEventList = useMemo(() => {
+    if (!eventSearch.trim()) return events;
+    const q = eventSearch.toLowerCase();
+    return events.filter(e => e.name.toLowerCase().includes(q));
+  }, [events, eventSearch]);
+
+  const auditRows = useMemo(() => {
+    if (lumaGuests.length === 0 && sfMembers.length === 0) return [];
+    return buildAuditRows(lumaGuests, sfMembers);
+  }, [lumaGuests, sfMembers]);
+
+  const filteredRows = useMemo(() => {
+    if (auditFilter === 'all') return auditRows;
+    return auditRows.filter(r => r.category === auditFilter);
+  }, [auditRows, auditFilter]);
+
+  const auditStats = useMemo(() => {
+    const lumaCheckedIn = lumaGuests.filter(g => g.checked_in_at).length;
+    const sfdcAttended = sfMembers.filter(m => m.status === 'Attended').length;
+    const delta = lumaCheckedIn - sfdcAttended;
+    const issues = auditRows.filter(r => r.category !== 'ok' && r.category !== 'sfdc_only').length;
+    return { lumaCheckedIn, sfdcAttended, delta, issues };
+  }, [lumaGuests, sfMembers, auditRows]);
+
+  const handleDownloadCsv = useCallback(() => {
+    if (filteredRows.length === 0) return;
+    const headers = ['Name', 'Email', 'Luma Status', 'SFDC Status', 'Category'];
+    const escape = (v: string) => `"${v.replace(/"/g, '""')}"`;
+    const rows = filteredRows.map(r => [
+      escape(r.name ?? ''),
+      escape(r.email),
+      escape(r.lumaStatus),
+      escape(r.sfdcStatus),
+      escape(r.category),
+    ].join(','));
+    const csv = [headers.map(escape).join(','), ...rows].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    const safeName = (selectedEvent?.name ?? 'audit').replace(/[^a-z0-9]/gi, '-').toLowerCase();
+    link.download = `${safeName}-sfdc-audit.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }, [filteredRows, selectedEvent]);
+
+  const handleAuditFilterAll = useCallback(() => setAuditFilter('all'), []);
+  const handleAuditFilterNeedsAttend = useCallback(() => setAuditFilter('needs_attend'), []);
+  const handleAuditFilterLumaOnly = useCallback(() => setAuditFilter('luma_only'), []);
+  const handleAuditFilterSfdcOnly = useCallback(() => setAuditFilter('sfdc_only'), []);
+  const handleAuditFilterOk = useCallback(() => setAuditFilter('ok'), []);
+
+  const auditFilterTabClass = useCallback((f: AuditFilter) => `px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+    auditFilter === f
+      ? 'bg-gray-900 text-white'
+      : 'bg-white text-gray-500 border border-gray-200 hover:text-gray-700'
+  }`, [auditFilter]);
+
+  if (loadingEvents) return <div className="text-sm text-gray-400">Loading events…</div>;
+  if (eventsError) return <ErrorBanner message={eventsError} />;
+
+  const dataReady = !loadingGuests && !loadingMembers && selectedEvent && selectedCampaign && auditRows.length > 0;
+
+  return (
+    <div className="space-y-6">
+      {/* Event picker (single-select) */}
+      <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+        <div className="flex items-center gap-3 border-b border-gray-100 px-4 py-3">
+          <input
+            type="text"
+            value={eventSearch}
+            onChange={handleEventSearchChange}
+            placeholder="Filter events…"
+            className="flex-1 bg-transparent text-sm text-gray-900 placeholder-gray-400 outline-none"
+          />
+          {selectedEvent && (
+            <span className="shrink-0 text-xs text-gray-400">
+              Selected: <span className="font-medium text-gray-600">{selectedEvent.name}</span>
+            </span>
+          )}
+        </div>
+        <div className="max-h-64 overflow-y-auto">
+          {filteredEventList.length === 0 ? (
+            <div className="px-4 py-3 text-sm text-gray-400">No events match</div>
+          ) : (
+            filteredEventList.map(event => {
+              const isSelected = selectedEvent?.api_id === event.api_id;
+              return (
+                <button
+                  key={event.api_id}
+                  type="button"
+                  onClick={() => handleSelectEvent(event)}
+                  className={`flex w-full cursor-pointer items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-gray-50 ${isSelected ? 'bg-blue-50' : ''}`}
+                >
+                  <span className={`h-2 w-2 shrink-0 rounded-full ${isSelected ? 'bg-blue-500' : 'bg-gray-200'}`} />
+                  <span className="flex-1 text-sm text-gray-700">{event.name}</span>
+                  <span className="shrink-0 text-xs text-gray-400">{formatShortDate(event.start_at)}</span>
+                </button>
+              );
+            })
+          )}
+        </div>
+      </div>
+
+      {/* Campaign section */}
+      {selectedEvent && (
+        <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <p className="mb-3 text-xs font-medium uppercase tracking-wide text-gray-400">
+            Salesforce Campaign
+          </p>
+
+          {campaignLookupError && <ErrorBanner message={`Campaign lookup error: ${campaignLookupError}`} />}
+
+          {!selectedCampaign && campaignCandidates.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-sm text-gray-600">Multiple campaigns found — select one:</p>
+              {campaignCandidates.map(c => (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => handleSelectCampaignCandidate(c)}
+                  className="flex w-full items-start gap-2 rounded-lg border border-gray-200 px-3 py-2 text-left hover:bg-gray-50"
+                >
+                  <div>
+                    <div className="text-sm font-medium text-gray-900">{c.name}</div>
+                    <div className="text-xs text-gray-400">{c.id}</div>
+                  </div>
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={handleShowManualInput}
+                className="text-xs text-gray-400 hover:text-gray-600"
+              >
+                Enter ID manually instead
+              </button>
+            </div>
+          )}
+
+          {!selectedCampaign && campaignCandidates.length === 0 && showManualInput && (
+            <div className="space-y-2">
+              <p className="text-sm text-gray-500">No campaign found automatically. Enter the Salesforce Campaign ID:</p>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={manualCampaignId}
+                  onChange={handleManualCampaignIdChange}
+                  placeholder="Campaign ID (e.g. 701…)"
+                  className="flex-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm outline-none focus:border-gray-500 focus:ring-2 focus:ring-gray-200"
+                />
+                <input
+                  type="text"
+                  value={manualCampaignName}
+                  onChange={handleManualCampaignNameChange}
+                  placeholder="Display name (optional)"
+                  className="flex-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm outline-none focus:border-gray-500 focus:ring-2 focus:ring-gray-200"
+                />
+                <button
+                  type="button"
+                  onClick={handleConfirmManualCampaign}
+                  disabled={!manualCampaignId.trim()}
+                  className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-40 hover:bg-gray-700"
+                >
+                  Load
+                </button>
+              </div>
+            </div>
+          )}
+
+          {selectedCampaign && (
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-medium text-gray-900">{selectedCampaign.name}</div>
+                <div className="text-xs text-gray-400">{selectedCampaign.id}</div>
+              </div>
+              <button
+                type="button"
+                onClick={handleEditCampaign}
+                className="shrink-0 text-xs text-gray-400 hover:text-gray-600"
+              >
+                Change
+              </button>
+            </div>
+          )}
+
+          {!selectedCampaign && !showManualInput && campaignCandidates.length === 0 && !campaignLookupError && (
+            <div className="text-sm text-gray-400">Looking up campaign…</div>
+          )}
+        </div>
+      )}
+
+      {/* Loading states */}
+      {loadingGuests && (
+        <div className="text-sm text-gray-400">Loading Luma guests…</div>
+      )}
+      {loadingMembers && (
+        <div className="text-sm text-gray-400">Loading Salesforce campaign members…</div>
+      )}
+
+      {guestsError && <ErrorBanner message={`Luma error: ${guestsError}`} />}
+      {membersError && <ErrorBanner message={`Salesforce error: ${membersError}`} />}
+
+      {/* Audit results */}
+      {dataReady && (
+        <>
+          {/* Summary bar */}
+          <div className="flex flex-wrap gap-2">
+            <div className="flex items-center gap-1.5 rounded-full bg-blue-100 px-3 py-1 text-xs font-medium text-blue-700">
+              <span className="text-sm font-semibold">{auditStats.lumaCheckedIn}</span>
+              Luma Checked In
+            </div>
+            <div className="flex items-center gap-1.5 rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-700">
+              <span className="text-sm font-semibold">{auditStats.sfdcAttended}</span>
+              SFDC Attended
+            </div>
+            <div className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium ${
+              auditStats.delta !== 0 ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'
+            }`}>
+              <span className="text-sm font-semibold">
+                {auditStats.delta > 0 ? `+${auditStats.delta}` : auditStats.delta}
+              </span>
+              Delta
+            </div>
+            <div className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium ${
+              auditStats.issues > 0 ? 'bg-orange-100 text-orange-700' : 'bg-gray-100 text-gray-600'
+            }`}>
+              <span className="text-sm font-semibold">{auditStats.issues}</span>
+              Issues
+            </div>
+          </div>
+
+          {/* Filter tabs + CSV */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <button type="button" onClick={handleAuditFilterAll} className={auditFilterTabClass('all')}>
+              All ({auditRows.length})
+            </button>
+            <button type="button" onClick={handleAuditFilterNeedsAttend} className={auditFilterTabClass('needs_attend')}>
+              Needs Update ({auditRows.filter(r => r.category === 'needs_attend').length})
+            </button>
+            <button type="button" onClick={handleAuditFilterLumaOnly} className={auditFilterTabClass('luma_only')}>
+              Missing from SFDC ({auditRows.filter(r => r.category === 'luma_only').length})
+            </button>
+            <button type="button" onClick={handleAuditFilterSfdcOnly} className={auditFilterTabClass('sfdc_only')}>
+              SFDC Only ({auditRows.filter(r => r.category === 'sfdc_only').length})
+            </button>
+            <button type="button" onClick={handleAuditFilterOk} className={auditFilterTabClass('ok')}>
+              OK ({auditRows.filter(r => r.category === 'ok').length})
+            </button>
+            <div className="ml-auto">
+              <button
+                type="button"
+                onClick={handleDownloadCsv}
+                className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-600 shadow-sm transition hover:bg-gray-50"
+              >
+                Download CSV
+              </button>
+            </div>
+          </div>
+
+          {/* Results table */}
+          <div className="overflow-x-auto overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-100 bg-gray-50 text-left text-xs font-medium uppercase tracking-wide text-gray-400">
+                  <th className="px-5 py-3">Name</th>
+                  <th className="px-5 py-3">Email</th>
+                  <th className="px-5 py-3">Luma Status</th>
+                  <th className="px-5 py-3">SFDC Status</th>
+                  <th className="px-5 py-3">Category</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50">
+                {filteredRows.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="px-5 py-8 text-center text-sm text-gray-400">
+                      No rows match the selected filter.
+                    </td>
+                  </tr>
+                ) : (
+                  filteredRows.map(row => (
+                    <tr key={row.email} className={`${AUDIT_ROW_COLORS[row.category]} hover:brightness-95`}>
+                      <td className="px-5 py-3.5 font-medium text-gray-900">
+                        {row.name ?? <span className="text-gray-400">—</span>}
+                      </td>
+                      <td className="px-5 py-3.5 text-gray-500">{row.email}</td>
+                      <td className="px-5 py-3.5">
+                        <AuditLumaStatusBadge status={row.lumaStatus} />
+                      </td>
+                      <td className="px-5 py-3.5">
+                        <AuditSfdcStatusBadge status={row.sfdcStatus} />
+                      </td>
+                      <td className="px-5 py-3.5 text-xs text-gray-500 capitalize">
+                        {row.category.replace(/_/g, ' ')}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {/* Empty state when event & campaign are both selected but returned no data */}
+      {!loadingGuests && !loadingMembers && selectedEvent && selectedCampaign && auditRows.length === 0 && (
+        <div className="rounded-lg border border-gray-200 bg-white px-4 py-10 text-center text-sm text-gray-400">
+          No records found for this event and campaign combination.
+        </div>
+      )}
+    </div>
+  );
+}
+
 // -- Page --------------------------------------------------------------------
 
-type Tab = 'search' | 'attendees';
+type Tab = 'search' | 'attendees' | 'audit';
 
 export default function EventsDashboard() {
   const [tab, setTab] = useState<Tab>('search');
@@ -1401,6 +2000,7 @@ export default function EventsDashboard() {
 
   const handleTabSearch = useCallback(() => setTab('search'), []);
   const handleTabAttendees = useCallback(() => setTab('attendees'), []);
+  const handleTabAudit = useCallback(() => setTab('audit'), []);
 
   const handleSearchEmail = useCallback((email: string) => {
     setSearchEmail(email);
@@ -1426,10 +2026,18 @@ export default function EventsDashboard() {
           >
             Event attendees
           </button>
+          <button
+            type="button"
+            onClick={handleTabAudit}
+            className={tabClass(tab === 'audit')}
+          >
+            SFDC Audit
+          </button>
         </div>
 
         {tab === 'search' && <SearchTab key={searchKey} initialQuery={searchEmail} />}
         {tab === 'attendees' && <AttendeesTab onSearchEmail={handleSearchEmail} />}
+        {tab === 'audit' && <AuditTab />}
       </div>
     </div>
   );
